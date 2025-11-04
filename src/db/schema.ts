@@ -256,3 +256,349 @@ export const eventRegistrations = sqliteTable('event_registrations', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
+
+// Job Postings table
+export const jobPostings = sqliteTable('job_postings', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  title: text('title').notNull(),
+  description: text('description').notNull(),
+  company: text('company').notNull(),
+  location: text('location').notNull(),
+  jobType: text('job_type').notNull(), // "full-time" | "part-time" | "contract" | "internship"
+  experienceLevel: text('experience_level').notNull(), // "entry" | "mid" | "senior" | "executive"
+  salaryMin: integer('salary_min'),
+  salaryMax: integer('salary_max'),
+  currency: text('currency').default('INR'),
+  skills: text('skills', { mode: 'json' }), // JSON array of required skills
+  requirements: text('requirements').notNull(),
+  benefits: text('benefits'),
+  applicationDeadline: text('application_deadline'),
+  isRemote: integer('is_remote', { mode: 'boolean' }).default(false),
+  postedById: text('posted_by_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  universityId: integer('university_id').references(() => universities.id),
+  status: text('status').notNull().default('active'), // "active" | "closed" | "draft"
+  applicationCount: integer('application_count').default(0),
+  viewCount: integer('view_count').default(0),
+  tags: text('tags', { mode: 'json' }),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Job Applications table
+export const jobApplications = sqliteTable('job_applications', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  jobId: integer('job_id').notNull().references(() => jobPostings.id, { onDelete: 'cascade' }),
+  applicantId: text('applicant_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  coverLetter: text('cover_letter'),
+  resumeUrl: text('resume_url'),
+  status: text('status').notNull().default('pending'), // "pending" | "reviewed" | "shortlisted" | "rejected" | "hired"
+  appliedAt: text('applied_at').notNull(),
+  reviewedAt: text('reviewed_at'),
+  reviewNotes: text('review_notes'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Mentorship Programs table
+export const mentorshipPrograms = sqliteTable('mentorship_programs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  mentorId: text('mentor_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  menteeId: text('mentee_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  programType: text('program_type').notNull(), // "career" | "academic" | "skill-development"
+  status: text('status').notNull().default('pending'), // "pending" | "active" | "completed" | "cancelled"
+  startDate: text('start_date'),
+  endDate: text('end_date'),
+  goals: text('goals'),
+  meetingFrequency: text('meeting_frequency'), // "weekly" | "bi-weekly" | "monthly"
+  notes: text('notes'),
+  rating: integer('rating'), // 1-5 rating after completion
+  feedback: text('feedback'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Notifications table
+export const notifications = sqliteTable('notifications', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  userId: text('user_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  type: text('type').notNull(), // "connection" | "message" | "job" | "event" | "credential" | "mention"
+  title: text('title').notNull(),
+  message: text('message').notNull(),
+  actionUrl: text('action_url'),
+  isRead: integer('is_read', { mode: 'boolean' }).default(false),
+  metadata: text('metadata', { mode: 'json' }),
+  createdAt: text('created_at').notNull(),
+  readAt: text('read_at'),
+});
+
+// Skills table for standardized skills
+export const skills = sqliteTable('skills', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull().unique(),
+  category: text('category').notNull(), // "technical" | "soft" | "language" | "certification"
+  description: text('description'),
+  isVerified: integer('is_verified', { mode: 'boolean' }).default(false),
+  createdAt: text('created_at').notNull(),
+});
+
+// User Skills mapping table
+export const userSkills = sqliteTable('user_skills', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  userId: text('user_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  skillId: integer('skill_id').notNull().references(() => skills.id, { onDelete: 'cascade' }),
+  proficiencyLevel: text('proficiency_level').notNull(), // "beginner" | "intermediate" | "advanced" | "expert"
+  yearsOfExperience: integer('years_of_experience'),
+  isEndorsed: integer('is_endorsed', { mode: 'boolean' }).default(false),
+  endorsementCount: integer('endorsement_count').default(0),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Skill Endorsements table
+export const skillEndorsements = sqliteTable('skill_endorsements', {
+  userSkillId: integer('user_skill_id').notNull().references(() => userSkills.id, { onDelete: 'cascade' }),
+  endorserId: text('endorser_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  comment: text('comment'),
+  createdAt: text('created_at').notNull(),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.userSkillId, table.endorserId] }),
+}));
+
+// Scholarships and Funding table
+export const scholarships = sqliteTable('scholarships', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  title: text('title').notNull(),
+  description: text('description').notNull(),
+  amount: integer('amount').notNull(),
+  currency: text('currency').default('INR'),
+  fundedById: text('funded_by_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  universityId: integer('university_id').references(() => universities.id),
+  eligibilityCriteria: text('eligibility_criteria').notNull(),
+  applicationDeadline: text('application_deadline').notNull(),
+  maxRecipients: integer('max_recipients').default(1),
+  currentRecipients: integer('current_recipients').default(0),
+  category: text('category').notNull(), // "merit", "need-based", "research", "sports", "arts"
+  academicYear: text('academic_year').notNull(),
+  requirements: text('requirements', { mode: 'json' }), // JSON array of requirements
+  status: text('status').notNull().default('active'), // "active", "closed", "draft"
+  isRecurring: integer('is_recurring', { mode: 'boolean' }).default(false),
+  recurringFrequency: text('recurring_frequency'), // "yearly", "semester"
+  tags: text('tags', { mode: 'json' }),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Scholarship Applications table
+export const scholarshipApplications = sqliteTable('scholarship_applications', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  scholarshipId: integer('scholarship_id').notNull().references(() => scholarships.id, { onDelete: 'cascade' }),
+  applicantId: text('applicant_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  applicationEssay: text('application_essay').notNull(),
+  academicRecords: text('academic_records'), // File URL or JSON
+  recommendationLetters: text('recommendation_letters', { mode: 'json' }), // Array of file URLs
+  financialNeedStatement: text('financial_need_statement'),
+  additionalDocuments: text('additional_documents', { mode: 'json' }),
+  status: text('status').notNull().default('pending'), // "pending", "under_review", "approved", "rejected"
+  reviewScore: integer('review_score'), // 1-100
+  reviewNotes: text('review_notes'),
+  reviewedAt: text('reviewed_at'),
+  reviewedById: text('reviewed_by_id').references(() => user.id),
+  appliedAt: text('applied_at').notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Guest Lectures and Workshops table
+export const guestSessions = sqliteTable('guest_sessions', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  title: text('title').notNull(),
+  description: text('description').notNull(),
+  sessionType: text('session_type').notNull(), // "lecture", "workshop", "seminar", "panel"
+  speakerId: text('speaker_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  universityId: integer('university_id').references(() => universities.id),
+  targetAudience: text('target_audience').notNull(), // "students", "faculty", "all"
+  department: text('department'),
+  sessionDate: text('session_date').notNull(),
+  sessionTime: text('session_time').notNull(),
+  duration: integer('duration').notNull(), // in minutes
+  venue: text('venue'),
+  isVirtual: integer('is_virtual', { mode: 'boolean' }).default(false),
+  meetingLink: text('meeting_link'),
+  maxAttendees: integer('max_attendees'),
+  currentAttendees: integer('current_attendees').default(0),
+  prerequisites: text('prerequisites'),
+  learningObjectives: text('learning_objectives', { mode: 'json' }),
+  materials: text('materials', { mode: 'json' }), // Links to slides, resources
+  status: text('status').notNull().default('scheduled'), // "scheduled", "ongoing", "completed", "cancelled"
+  feedback: text('feedback', { mode: 'json' }), // Post-session feedback
+  recordingUrl: text('recording_url'),
+  tags: text('tags', { mode: 'json' }),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Guest Session Registrations table
+export const guestSessionRegistrations = sqliteTable('guest_session_registrations', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  sessionId: integer('session_id').notNull().references(() => guestSessions.id, { onDelete: 'cascade' }),
+  attendeeId: text('attendee_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  registeredAt: text('registered_at').notNull(),
+  attendanceStatus: text('attendance_status').notNull().default('registered'), // "registered", "attended", "no_show"
+  feedback: text('feedback'),
+  rating: integer('rating'), // 1-5
+  certificateIssued: integer('certificate_issued', { mode: 'boolean' }).default(false),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Curriculum Feedback table
+export const curriculumFeedback = sqliteTable('curriculum_feedback', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  submittedById: text('submitted_by_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  universityId: integer('university_id').notNull().references(() => universities.id),
+  department: text('department').notNull(),
+  courseCode: text('course_code'),
+  courseName: text('course_name'),
+  feedbackType: text('feedback_type').notNull(), // "course_content", "industry_relevance", "skill_gap", "new_course_suggestion"
+  currentIndustryTrends: text('current_industry_trends').notNull(),
+  suggestedChanges: text('suggested_changes').notNull(),
+  skillsInDemand: text('skills_in_demand', { mode: 'json' }),
+  toolsAndTechnologies: text('tools_and_technologies', { mode: 'json' }),
+  industryProjects: text('industry_projects', { mode: 'json' }),
+  priority: text('priority').notNull().default('medium'), // "low", "medium", "high", "urgent"
+  implementationComplexity: text('implementation_complexity'), // "low", "medium", "high"
+  potentialImpact: text('potential_impact'), // "low", "medium", "high"
+  supportingEvidence: text('supporting_evidence'),
+  status: text('status').notNull().default('submitted'), // "submitted", "under_review", "approved", "implemented", "rejected"
+  reviewNotes: text('review_notes'),
+  reviewedAt: text('reviewed_at'),
+  reviewedById: text('reviewed_by_id').references(() => user.id),
+  implementationTimeline: text('implementation_timeline'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Industry Insights table
+export const industryInsights = sqliteTable('industry_insights', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  title: text('title').notNull(),
+  content: text('content').notNull(),
+  authorId: text('author_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  industry: text('industry').notNull(),
+  insightType: text('insight_type').notNull(), // "trend", "skill_demand", "career_path", "salary_insights", "company_culture"
+  targetAudience: text('target_audience').notNull(), // "students", "recent_graduates", "experienced", "all"
+  relevantSkills: text('relevant_skills', { mode: 'json' }),
+  companiesInvolved: text('companies_involved', { mode: 'json' }),
+  salaryRange: text('salary_range'),
+  experienceLevel: text('experience_level'), // "entry", "mid", "senior", "executive"
+  geographicRelevance: text('geographic_relevance', { mode: 'json' }),
+  timeRelevance: text('time_relevance'), // "current", "emerging", "future"
+  sources: text('sources', { mode: 'json' }),
+  tags: text('tags', { mode: 'json' }),
+  upvotes: integer('upvotes').default(0),
+  views: integer('views').default(0),
+  isVerified: integer('is_verified', { mode: 'boolean' }).default(false),
+  verifiedAt: text('verified_at'),
+  verifiedById: text('verified_by_id').references(() => user.id),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Project Collaborations table
+export const projectCollaborations = sqliteTable('project_collaborations', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  title: text('title').notNull(),
+  description: text('description').notNull(),
+  projectType: text('project_type').notNull(), // "research", "startup", "internship", "capstone", "hackathon"
+  initiatorId: text('initiator_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  universityId: integer('university_id').references(() => universities.id),
+  department: text('department'),
+  requiredSkills: text('required_skills', { mode: 'json' }),
+  teamSize: integer('team_size').notNull(),
+  currentTeamSize: integer('current_team_size').default(1),
+  duration: text('duration'), // "1 month", "1 semester", "6 months"
+  startDate: text('start_date'),
+  endDate: text('end_date'),
+  budget: integer('budget'),
+  fundingSource: text('funding_source'),
+  deliverables: text('deliverables', { mode: 'json' }),
+  technologies: text('technologies', { mode: 'json' }),
+  mentorshipAvailable: integer('mentorship_available', { mode: 'boolean' }).default(false),
+  mentorId: text('mentor_id').references(() => user.id),
+  applicationDeadline: text('application_deadline'),
+  status: text('status').notNull().default('recruiting'), // "recruiting", "in_progress", "completed", "cancelled"
+  visibility: text('visibility').notNull().default('public'), // "public", "university_only", "department_only"
+  tags: text('tags', { mode: 'json' }),
+  repositoryUrl: text('repository_url'),
+  projectUrl: text('project_url'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Project Collaboration Applications table
+export const projectApplications = sqliteTable('project_applications', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  projectId: integer('project_id').notNull().references(() => projectCollaborations.id, { onDelete: 'cascade' }),
+  applicantId: text('applicant_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  applicationMessage: text('application_message').notNull(),
+  relevantExperience: text('relevant_experience'),
+  portfolioLinks: text('portfolio_links', { mode: 'json' }),
+  availableHours: integer('available_hours'), // hours per week
+  preferredRole: text('preferred_role'),
+  status: text('status').notNull().default('pending'), // "pending", "accepted", "rejected"
+  reviewNotes: text('review_notes'),
+  reviewedAt: text('reviewed_at'),
+  appliedAt: text('applied_at').notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Alumni Donations and Giving table
+export const donations = sqliteTable('donations', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  donorId: text('donor_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  universityId: integer('university_id').notNull().references(() => universities.id),
+  amount: integer('amount').notNull(),
+  currency: text('currency').default('INR'),
+  donationType: text('donation_type').notNull(), // "general", "scholarship", "infrastructure", "research", "emergency"
+  purpose: text('purpose').notNull(),
+  isAnonymous: integer('is_anonymous', { mode: 'boolean' }).default(false),
+  isRecurring: integer('is_recurring', { mode: 'boolean' }).default(false),
+  recurringFrequency: text('recurring_frequency'), // "monthly", "quarterly", "yearly"
+  paymentMethod: text('payment_method'),
+  transactionId: text('transaction_id'),
+  paymentStatus: text('payment_status').notNull().default('pending'), // "pending", "completed", "failed", "refunded"
+  taxDeductible: integer('tax_deductible', { mode: 'boolean' }).default(true),
+  receiptIssued: integer('receipt_issued', { mode: 'boolean' }).default(false),
+  receiptUrl: text('receipt_url'),
+  donationDate: text('donation_date').notNull(),
+  acknowledgmentSent: integer('acknowledgment_sent', { mode: 'boolean' }).default(false),
+  publicRecognition: integer('public_recognition', { mode: 'boolean' }).default(false),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Career Guidance Sessions table
+export const careerGuidanceSessions = sqliteTable('career_guidance_sessions', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  mentorId: text('mentor_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  menteeId: text('mentee_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  sessionType: text('session_type').notNull(), // "one_on_one", "group", "workshop"
+  topic: text('topic').notNull(),
+  description: text('description'),
+  scheduledDate: text('scheduled_date').notNull(),
+  scheduledTime: text('scheduled_time').notNull(),
+  duration: integer('duration').notNull(), // in minutes
+  venue: text('venue'),
+  isVirtual: integer('is_virtual', { mode: 'boolean' }).default(true),
+  meetingLink: text('meeting_link'),
+  agenda: text('agenda', { mode: 'json' }),
+  resources: text('resources', { mode: 'json' }),
+  status: text('status').notNull().default('scheduled'), // "scheduled", "completed", "cancelled", "rescheduled"
+  feedback: text('feedback'),
+  rating: integer('rating'), // 1-5
+  followUpRequired: integer('follow_up_required', { mode: 'boolean' }).default(false),
+  followUpNotes: text('follow_up_notes'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});

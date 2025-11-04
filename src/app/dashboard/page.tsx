@@ -6,10 +6,12 @@ import { useEffect, useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Users, MessageSquare, FileCheck, Award, LogOut } from "lucide-react";
+import { Users, MessageSquare, FileCheck, Award, LogOut, Briefcase, Calendar, TrendingUp, Bell, Heart } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
 import Feed from "@/components/Feed";
+import { NotificationDropdown } from "@/components/NotificationDropdown";
+import { GamificationWidget } from "@/components/GamificationWidget";
 
 export default function DashboardPage() {
   const { data: session, isPending, refetch } = useSession();
@@ -101,22 +103,33 @@ export default function DashboardPage() {
             <Link href="/" className="text-2xl font-bold text-primary">
               UniLink
             </Link>
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
               <Link href="/dashboard/profile">
-                <Button variant="ghost">My Profile</Button>
+                <Button variant="ghost" size="sm">My Profile</Button>
               </Link>
               <Link href="/dashboard/alumni">
-                <Button variant="ghost">Alumni Directory</Button>
+                <Button variant="ghost" size="sm">Network</Button>
+              </Link>
+              <Link href="/dashboard/jobs">
+                <Button variant="ghost" size="sm">Jobs</Button>
               </Link>
               <Link href="/dashboard/messages">
-                <Button variant="ghost">Messages</Button>
+                <Button variant="ghost" size="sm">Messages</Button>
               </Link>
-              <Link href="/dashboard/credentials">
-                <Button variant="ghost">Credentials</Button>
+              <Link href="/dashboard/events">
+                <Button variant="ghost" size="sm">Events</Button>
               </Link>
-              <Button variant="ghost" onClick={handleSignOut}>
-                <LogOut className="mr-2 h-4 w-4" />
-                Logout
+              <Link href="/dashboard/give-back">
+                <Button variant="ghost" size="sm" className="text-red-600 hover:text-red-700">
+                  Give Back
+                </Button>
+              </Link>
+              <Link href="/dashboard/analytics">
+                <Button variant="ghost" size="sm">Analytics</Button>
+              </Link>
+              <NotificationDropdown />
+              <Button variant="ghost" size="sm" onClick={handleSignOut}>
+                <LogOut className="h-4 w-4" />
               </Button>
             </div>
           </div>
@@ -136,51 +149,62 @@ export default function DashboardPage() {
         </div>
 
         {/* Stats Grid */}
-        <div className="grid md:grid-cols-3 gap-6 mb-8">
-          <Card>
+        <div className="grid md:grid-cols-4 gap-6 mb-8">
+          <Card className="hover:shadow-md transition-shadow">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Connections</CardTitle>
+              <CardTitle className="text-sm font-medium">Network</CardTitle>
               <Users className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{stats.connections}</div>
+              <div className="text-2xl font-bold text-blue-600">{stats.connections}</div>
               <p className="text-xs text-muted-foreground">
-                Alumni in your network
+                Alumni connections
               </p>
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className="hover:shadow-md transition-shadow">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">
-                Unread Messages
-              </CardTitle>
+              <CardTitle className="text-sm font-medium">Messages</CardTitle>
               <MessageSquare className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{stats.messages}</div>
+              <div className="text-2xl font-bold text-green-600">{stats.messages}</div>
               <p className="text-xs text-muted-foreground">
-                New messages waiting
+                Unread messages
               </p>
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className="hover:shadow-md transition-shadow">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <CardTitle className="text-sm font-medium">Credentials</CardTitle>
-              <FileCheck className="h-4 w-4 text-muted-foreground" />
+              <Award className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{stats.credentials}</div>
+              <div className="text-2xl font-bold text-purple-600">{stats.credentials}</div>
               <p className="text-xs text-muted-foreground">
-                Verified on blockchain
+                Blockchain verified
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card className="hover:shadow-md transition-shadow">
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Profile Views</CardTitle>
+              <TrendingUp className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold text-orange-600">--</div>
+              <p className="text-xs text-muted-foreground">
+                This week
               </p>
             </CardContent>
           </Card>
         </div>
 
-        {/* Quick Actions + Global Feed */}
-        <div className="grid md:grid-cols-2 gap-6 mb-8">
+        {/* Quick Actions + Global Feed + Gamification */}
+        <div className="grid md:grid-cols-3 gap-6 mb-8">
           <Card>
             <CardHeader>
               <CardTitle>Quick Actions</CardTitle>
@@ -192,19 +216,31 @@ export default function DashboardPage() {
               <Link href="/dashboard/alumni">
                 <Button className="w-full justify-start" variant="outline">
                   <Users className="mr-2 h-4 w-4" />
-                  Browse Alumni Directory
+                  Explore Network
                 </Button>
               </Link>
-              <Link href="/dashboard/messages">
+              <Link href="/dashboard/jobs">
                 <Button className="w-full justify-start" variant="outline">
-                  <MessageSquare className="mr-2 h-4 w-4" />
-                  Send a Message
+                  <Briefcase className="mr-2 h-4 w-4" />
+                  Browse Jobs
+                </Button>
+              </Link>
+              <Link href="/dashboard/events">
+                <Button className="w-full justify-start" variant="outline">
+                  <Calendar className="mr-2 h-4 w-4" />
+                  Upcoming Events
                 </Button>
               </Link>
               <Link href="/dashboard/credentials">
                 <Button className="w-full justify-start" variant="outline">
                   <Award className="mr-2 h-4 w-4" />
-                  View My Credentials
+                  My Credentials
+                </Button>
+              </Link>
+              <Link href="/dashboard/give-back">
+                <Button className="w-full justify-start" variant="outline" style={{borderColor: '#dc2626', color: '#dc2626'}}>
+                  <Heart className="mr-2 h-4 w-4" />
+                  Give Back to KLU
                 </Button>
               </Link>
             </CardContent>
@@ -221,6 +257,9 @@ export default function DashboardPage() {
               <Feed />
             </CardContent>
           </Card>
+
+          {/* Gamification Widget */}
+          <GamificationWidget />
         </div>
       </div>
     </div>
