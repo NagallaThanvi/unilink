@@ -1,4 +1,4 @@
-import { createPublicClient, http, getTransactionReceipt, type Hash, decodeEventLog } from "viem";
+import { createPublicClient, http, type Hash, decodeEventLog } from "viem";
 
 // Minimal chain-agnostic setup: use RPC URL from env. You may refine
 // with a specific chain import from `viem/chains` if desired.

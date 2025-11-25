@@ -1,16 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { events, eventRegistrations, user } from '@/db/schema';
-import { eq, and, desc } from 'drizzle-orm';
-import { auth } from '@/lib/auth';
+import { adminDb, adminAuth } from '@/lib/firebaseAdmin';
+import { getCurrentUser } from '@/lib/auth';
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const session = await auth.api.getSession({ headers: request.headers });
-    if (!session) {
+    const authUser = await getCurrentUser(request);
+    if (!authUser) {
       return NextResponse.json(
         { error: 'Authentication required', code: 'UNAUTHORIZED' },
         { status: 401 }
@@ -18,29 +16,25 @@ export async function GET(
     }
 
     const { id } = await params;
-    const eventId = parseInt(id);
 
-    if (!id || isNaN(eventId)) {
+    if (!id) {
       return NextResponse.json(
         { error: 'Valid event ID is required', code: 'INVALID_ID' },
         { status: 400 }
       );
     }
 
-    const event = await db
-      .select()
-      .from(events)
-      .where(eq(events.id, eventId))
-      .limit(1);
-
-    if (event.length === 0) {
+    const eventsColl = adminDb.collection('events');
+    const eventDoc = await eventsColl.doc(id).get();
+    if (!eventDoc.exists) {
       return NextResponse.json(
         { error: 'Event not found', code: 'EVENT_NOT_FOUND' },
         { status: 404 }
       );
     }
 
-    if (event[0].organizerId !== session.user.id) {
+    const eventData = eventDoc.data()!;
+    if (eventData.organizerId !== authUser.id) {
       return NextResponse.json(
         { error: 'Only event organizer can view registrations', code: 'FORBIDDEN' },
         { status: 403 }
@@ -63,37 +57,44 @@ export async function GET(
       );
     }
 
-    let query = db
-      .select({
-        id: eventRegistrations.id,
-        eventId: eventRegistrations.eventId,
-        userId: eventRegistrations.userId,
-        registeredAt: eventRegistrations.registeredAt,
-        attendanceStatus: eventRegistrations.attendanceStatus,
-        createdAt: eventRegistrations.createdAt,
-        updatedAt: eventRegistrations.updatedAt,
-        user: {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          image: user.image,
-        },
-      })
-      .from(eventRegistrations)
-      .innerJoin(user, eq(eventRegistrations.userId, user.id))
-      .where(
-        attendanceStatus
-          ? and(
-              eq(eventRegistrations.eventId, eventId),
-              eq(eventRegistrations.attendanceStatus, attendanceStatus)
-            )
-          : eq(eventRegistrations.eventId, eventId)
-      )
-      .orderBy(desc(eventRegistrations.registeredAt))
-      .limit(limit)
-      .offset(offset);
+    let query: FirebaseFirestore.Query = adminDb
+      .collection('eventRegistrations')
+      .where('eventId', '==', id)
+      .orderBy('registeredAt', 'desc');
 
-    const registrations = await query;
+    if (attendanceStatus) {
+      query = query.where('attendanceStatus', '==', attendanceStatus);
+    }
+
+    const snapshot = await query.limit(limit).offset(offset).get();
+    const regs = snapshot.docs;
+
+    // Enrich with Firebase Auth user data
+    const registrations = await Promise.all(
+      regs.map(async (regDoc) => {
+        const data = regDoc.data();
+        let user = null;
+        try {
+          const userRecord = await adminAuth.getUser(data.userId);
+          user = {
+            id: userRecord.uid,
+            name: userRecord.displayName || null,
+            email: userRecord.email || null,
+            image: userRecord.photoURL || null,
+          };
+        } catch {}
+        return {
+          id: regDoc.id,
+          eventId: data.eventId,
+          userId: data.userId,
+          registeredAt: data.registeredAt,
+          attendanceStatus: data.attendanceStatus,
+          createdAt: data.createdAt,
+          updatedAt: data.updatedAt,
+          user,
+        };
+      })
+    );
 
     return NextResponse.json(registrations, { status: 200 });
   } catch (error) {

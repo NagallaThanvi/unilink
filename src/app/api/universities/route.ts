@@ -1,7 +1,39 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { universities } from '@/db/schema';
-import { eq, like, and, or, desc } from 'drizzle-orm';
+import { adminDb } from '@/lib/firebaseAdmin';
+
+const COLLECTION_NAME = 'universities';
+
+type University = {
+  id?: string;
+  name: string;
+  domain: string;
+  country: string;
+  tenantId: string;
+  logo?: string | null;
+  description?: string | null;
+  isActive: boolean;
+  adminIds?: string[] | null;
+  settings?: Record<string, any> | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function mapDoc(doc: FirebaseFirestore.DocumentSnapshot): University {
+  const data = doc.data() as Omit<University, 'id'> | undefined;
+  if (!data) {
+    return {
+      id: doc.id,
+      name: '',
+      domain: '',
+      country: '',
+      tenantId: '',
+      isActive: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+  return { id: doc.id, ...data };
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -14,85 +46,71 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(parseInt(searchParams.get('limit') || '10'), 100);
     const offset = parseInt(searchParams.get('offset') || '0');
 
-    // Single university by ID
+    const collection = adminDb.collection(COLLECTION_NAME);
+
+    // Single university by ID (document id)
     if (id) {
-      if (isNaN(parseInt(id))) {
-        return NextResponse.json({ 
-          error: "Valid ID is required",
-          code: "INVALID_ID" 
-        }, { status: 400 });
+      const doc = await collection.doc(id).get();
+      if (!doc.exists) {
+        return NextResponse.json(
+          { error: 'University not found', code: 'UNIVERSITY_NOT_FOUND' },
+          { status: 404 },
+        );
       }
-
-      const university = await db.select()
-        .from(universities)
-        .where(eq(universities.id, parseInt(id)))
-        .limit(1);
-
-      if (university.length === 0) {
-        return NextResponse.json({ 
-          error: 'University not found',
-          code: "UNIVERSITY_NOT_FOUND" 
-        }, { status: 404 });
-      }
-
-      return NextResponse.json(university[0], { status: 200 });
+      return NextResponse.json(mapDoc(doc), { status: 200 });
     }
 
     // Single university by domain
     if (domain) {
-      const university = await db.select()
-        .from(universities)
-        .where(eq(universities.domain, domain))
-        .limit(1);
-
-      if (university.length === 0) {
-        return NextResponse.json({ 
-          error: 'University not found',
-          code: "UNIVERSITY_NOT_FOUND" 
-        }, { status: 404 });
+      const snapshot = await collection.where('domain', '==', domain).limit(1).get();
+      if (snapshot.empty) {
+        return NextResponse.json(
+          { error: 'University not found', code: 'UNIVERSITY_NOT_FOUND' },
+          { status: 404 },
+        );
       }
-
-      return NextResponse.json(university[0], { status: 200 });
+      const doc = snapshot.docs[0];
+      return NextResponse.json(mapDoc(doc), { status: 200 });
     }
 
-    // List universities with filters
-    let query: any = db.select().from(universities);
-    const conditions = [];
+    // List universities with filters (filter mostly in memory for simplicity)
+    const snapshot = await collection.get();
+    let results = snapshot.docs.map(mapDoc);
 
     if (country) {
-      conditions.push(eq(universities.country, country));
+      results = results.filter((u) => u.country === country);
     }
 
     if (isActiveParam !== null) {
       const isActive = isActiveParam === 'true';
-      conditions.push(eq(universities.isActive, isActive));
+      results = results.filter((u) => Boolean(u.isActive) === isActive);
     }
 
     if (search) {
-      conditions.push(
-        or(
-          like(universities.name, `%${search}%`),
-          like(universities.country, `%${search}%`)
-        )
+      const s = search.toLowerCase();
+      results = results.filter(
+        (u) =>
+          u.name.toLowerCase().includes(s) ||
+          u.country.toLowerCase().includes(s),
       );
     }
 
-    if (conditions.length > 0) {
-      query = query.where(and(...conditions));
-    }
+    // Order by createdAt desc if present
+    results.sort((a, b) => {
+      const aTime = a.createdAt ? Date.parse(a.createdAt) : 0;
+      const bTime = b.createdAt ? Date.parse(b.createdAt) : 0;
+      return bTime - aTime;
+    });
 
-    const results = await query
-      .orderBy(desc(universities.createdAt))
-      .limit(limit)
-      .offset(offset);
+    const paged = results.slice(offset, offset + limit);
 
-    return NextResponse.json(results, { status: 200 });
-
+    return NextResponse.json(paged, { status: 200 });
   } catch (error) {
-    console.error('GET error:', error);
-    return NextResponse.json({ 
-      error: 'Internal server error: ' + error 
-    }, { status: 500 });
+    console.error('GET /api/universities error:', error);
+    return NextResponse.json(
+      { error: 'Internal server error: ' + error },
+      { status: 500 },
+    );
   }
 }
 
@@ -103,109 +121,111 @@ export async function POST(request: NextRequest) {
 
     // Validate required fields
     if (!name || !name.trim()) {
-      return NextResponse.json({ 
-        error: "Name is required",
-        code: "MISSING_NAME" 
-      }, { status: 400 });
+      return NextResponse.json(
+        { error: 'Name is required', code: 'MISSING_NAME' },
+        { status: 400 },
+      );
     }
 
     if (!domain || !domain.trim()) {
-      return NextResponse.json({ 
-        error: "Domain is required",
-        code: "MISSING_DOMAIN" 
-      }, { status: 400 });
+      return NextResponse.json(
+        { error: 'Domain is required', code: 'MISSING_DOMAIN' },
+        { status: 400 },
+      );
     }
 
     if (!country || !country.trim()) {
-      return NextResponse.json({ 
-        error: "Country is required",
-        code: "MISSING_COUNTRY" 
-      }, { status: 400 });
+      return NextResponse.json(
+        { error: 'Country is required', code: 'MISSING_COUNTRY' },
+        { status: 400 },
+      );
     }
 
     if (!tenantId || !tenantId.trim()) {
-      return NextResponse.json({ 
-        error: "TenantId is required",
-        code: "MISSING_TENANT_ID" 
-      }, { status: 400 });
+      return NextResponse.json(
+        { error: 'TenantId is required', code: 'MISSING_TENANT_ID' },
+        { status: 400 },
+      );
     }
 
     // Validate domain format (allow multi-level domains like example.edu.in)
     const domainRegex = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
     if (!domainRegex.test(domain.trim().toLowerCase())) {
-      return NextResponse.json({ 
-        error: "Invalid domain format",
-        code: "INVALID_DOMAIN_FORMAT" 
-      }, { status: 400 });
+      return NextResponse.json(
+        { error: 'Invalid domain format', code: 'INVALID_DOMAIN_FORMAT' },
+        { status: 400 },
+      );
     }
 
     // Validate adminIds is array if provided
     if (adminIds !== undefined && !Array.isArray(adminIds)) {
-      return NextResponse.json({ 
-        error: "adminIds must be an array",
-        code: "INVALID_ADMIN_IDS" 
-      }, { status: 400 });
+      return NextResponse.json(
+        { error: 'adminIds must be an array', code: 'INVALID_ADMIN_IDS' },
+        { status: 400 },
+      );
     }
 
     // Validate settings is object if provided
     if (settings !== undefined && (typeof settings !== 'object' || Array.isArray(settings))) {
-      return NextResponse.json({ 
-        error: "settings must be an object",
-        code: "INVALID_SETTINGS" 
-      }, { status: 400 });
+      return NextResponse.json(
+        { error: 'settings must be an object', code: 'INVALID_SETTINGS' },
+        { status: 400 },
+      );
     }
 
-    // Check if domain already exists
-    const existingDomain = await db.select()
-      .from(universities)
-      .where(eq(universities.domain, domain.trim()))
-      .limit(1);
+    const collection = adminDb.collection(COLLECTION_NAME);
 
-    if (existingDomain.length > 0) {
-      return NextResponse.json({ 
-        error: "Domain already exists",
-        code: "DUPLICATE_DOMAIN" 
-      }, { status: 400 });
+    // Check if domain already exists
+    const existingDomainSnap = await collection
+      .where('domain', '==', domain.trim().toLowerCase())
+      .limit(1)
+      .get();
+    if (!existingDomainSnap.empty) {
+      return NextResponse.json(
+        { error: 'Domain already exists', code: 'DUPLICATE_DOMAIN' },
+        { status: 400 },
+      );
     }
 
     // Check if tenantId already exists
-    const existingTenantId = await db.select()
-      .from(universities)
-      .where(eq(universities.tenantId, tenantId.trim()))
-      .limit(1);
-
-    if (existingTenantId.length > 0) {
-      return NextResponse.json({ 
-        error: "TenantId already exists",
-        code: "DUPLICATE_TENANT_ID" 
-      }, { status: 400 });
+    const existingTenantSnap = await collection
+      .where('tenantId', '==', tenantId.trim())
+      .limit(1)
+      .get();
+    if (!existingTenantSnap.empty) {
+      return NextResponse.json(
+        { error: 'TenantId already exists', code: 'DUPLICATE_TENANT_ID' },
+        { status: 400 },
+      );
     }
 
     const now = new Date().toISOString();
 
-    const newUniversity = await db.insert(universities)
-      .values({
-        name: name.trim(),
-        domain: domain.trim().toLowerCase(),
-        country: country.trim(),
-        tenantId: tenantId.trim(),
-        logo: logo?.trim() || null,
-        description: description?.trim() || null,
-        isActive: isActive !== undefined ? isActive : true,
-        adminIds: adminIds || null,
-        settings: settings || null,
-        createdAt: now,
-        updatedAt: now
-      })
-      .returning();
+    const docRef = collection.doc();
+    const payload: University = {
+      name: name.trim(),
+      domain: domain.trim().toLowerCase(),
+      country: country.trim(),
+      tenantId: tenantId.trim(),
+      logo: logo?.trim() || null,
+      description: description?.trim() || null,
+      isActive: isActive !== undefined ? Boolean(isActive) : true,
+      adminIds: adminIds || null,
+      settings: settings || null,
+      createdAt: now,
+      updatedAt: now,
+    };
 
-    return NextResponse.json(newUniversity[0], { status: 201 });
+    await docRef.set(payload);
+    const created = mapDoc(await docRef.get());
 
+    return NextResponse.json(created, { status: 201 });
   } catch (error) {
-    console.error('POST error:', error);
-    return NextResponse.json({ 
-      error: 'Internal server error: ' + error 
-    }, { status: 500 });
+    console.error('POST /api/universities error:', error);
+    return NextResponse.json(
+      { error: 'Internal server error: ' + error },
+      { status: 500 },
+    );
   }
 }
 
@@ -214,106 +234,83 @@ export async function PUT(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const id = searchParams.get('id');
 
-    if (!id || isNaN(parseInt(id))) {
-      return NextResponse.json({ 
-        error: "Valid ID is required",
-        code: "INVALID_ID" 
-      }, { status: 400 });
+    if (!id) {
+      return NextResponse.json(
+        { error: 'Valid ID is required', code: 'INVALID_ID' },
+        { status: 400 },
+      );
     }
 
     const body = await request.json();
     const { name, domain, country, tenantId, logo, description, isActive, adminIds, settings } = body;
 
-    // Check if university exists
-    const existing = await db.select()
-      .from(universities)
-      .where(eq(universities.id, parseInt(id)))
-      .limit(1);
-
-    if (existing.length === 0) {
-      return NextResponse.json({ 
-        error: 'University not found',
-        code: "UNIVERSITY_NOT_FOUND" 
-      }, { status: 404 });
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const docRef = collection.doc(id);
+    const existingSnap = await docRef.get();
+    if (!existingSnap.exists) {
+      return NextResponse.json(
+        { error: 'University not found', code: 'UNIVERSITY_NOT_FOUND' },
+        { status: 404 },
+      );
     }
 
     // Validate domain format if provided
     if (domain) {
       const domainRegex = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
       if (!domainRegex.test(domain.trim().toLowerCase())) {
-        return NextResponse.json({ 
-          error: "Invalid domain format",
-          code: "INVALID_DOMAIN_FORMAT" 
-        }, { status: 400 });
+        return NextResponse.json(
+          { error: 'Invalid domain format', code: 'INVALID_DOMAIN_FORMAT' },
+          { status: 400 },
+        );
       }
 
       // Check if domain is already used by another university
-      const existingDomain = await db.select()
-        .from(universities)
-        .where(and(
-          eq(universities.domain, domain.trim()),
-          eq(universities.id, parseInt(id))
-        ))
-        .limit(1);
-
-      if (existingDomain.length === 0) {
-        const domainInUse = await db.select()
-          .from(universities)
-          .where(eq(universities.domain, domain.trim()))
-          .limit(1);
-
-        if (domainInUse.length > 0) {
-          return NextResponse.json({ 
-            error: "Domain already exists",
-            code: "DUPLICATE_DOMAIN" 
-          }, { status: 400 });
-        }
+      const existingDomain = await collection
+        .where('domain', '==', domain.trim().toLowerCase())
+        .limit(5)
+        .get();
+      const conflict = existingDomain.docs.find((d) => d.id !== id);
+      if (conflict) {
+        return NextResponse.json(
+          { error: 'Domain already exists', code: 'DUPLICATE_DOMAIN' },
+          { status: 400 },
+        );
       }
     }
 
     // Check if tenantId is already used by another university
     if (tenantId) {
-      const existingTenantId = await db.select()
-        .from(universities)
-        .where(and(
-          eq(universities.tenantId, tenantId.trim()),
-          eq(universities.id, parseInt(id))
-        ))
-        .limit(1);
-
-      if (existingTenantId.length === 0) {
-        const tenantIdInUse = await db.select()
-          .from(universities)
-          .where(eq(universities.tenantId, tenantId.trim()))
-          .limit(1);
-
-        if (tenantIdInUse.length > 0) {
-          return NextResponse.json({ 
-            error: "TenantId already exists",
-            code: "DUPLICATE_TENANT_ID" 
-          }, { status: 400 });
-        }
+      const existingTenant = await collection
+        .where('tenantId', '==', tenantId.trim())
+        .limit(5)
+        .get();
+      const conflict = existingTenant.docs.find((d) => d.id !== id);
+      if (conflict) {
+        return NextResponse.json(
+          { error: 'TenantId already exists', code: 'DUPLICATE_TENANT_ID' },
+          { status: 400 },
+        );
       }
     }
 
     // Validate adminIds is array if provided
     if (adminIds !== undefined && !Array.isArray(adminIds)) {
-      return NextResponse.json({ 
-        error: "adminIds must be an array",
-        code: "INVALID_ADMIN_IDS" 
-      }, { status: 400 });
+      return NextResponse.json(
+        { error: 'adminIds must be an array', code: 'INVALID_ADMIN_IDS' },
+        { status: 400 },
+      );
     }
 
     // Validate settings is object if provided
     if (settings !== undefined && (typeof settings !== 'object' || Array.isArray(settings))) {
-      return NextResponse.json({ 
-        error: "settings must be an object",
-        code: "INVALID_SETTINGS" 
-      }, { status: 400 });
+      return NextResponse.json(
+        { error: 'settings must be an object', code: 'INVALID_SETTINGS' },
+        { status: 400 },
+      );
     }
 
-    const updates: any = {
-      updatedAt: new Date().toISOString()
+    const updates: Partial<University> = {
+      updatedAt: new Date().toISOString(),
     };
 
     if (name !== undefined) updates.name = name.trim();
@@ -322,22 +319,20 @@ export async function PUT(request: NextRequest) {
     if (tenantId !== undefined) updates.tenantId = tenantId.trim();
     if (logo !== undefined) updates.logo = logo?.trim() || null;
     if (description !== undefined) updates.description = description?.trim() || null;
-    if (isActive !== undefined) updates.isActive = isActive;
+    if (isActive !== undefined) updates.isActive = Boolean(isActive);
     if (adminIds !== undefined) updates.adminIds = adminIds;
     if (settings !== undefined) updates.settings = settings;
 
-    const updated = await db.update(universities)
-      .set(updates)
-      .where(eq(universities.id, parseInt(id)))
-      .returning();
+    await docRef.set(updates, { merge: true });
+    const updated = mapDoc(await docRef.get());
 
-    return NextResponse.json(updated[0], { status: 200 });
-
+    return NextResponse.json(updated, { status: 200 });
   } catch (error) {
-    console.error('PUT error:', error);
-    return NextResponse.json({ 
-      error: 'Internal server error: ' + error 
-    }, { status: 500 });
+    console.error('PUT /api/universities error:', error);
+    return NextResponse.json(
+      { error: 'Internal server error: ' + error },
+      { status: 500 },
+    );
   }
 }
 
@@ -346,39 +341,36 @@ export async function DELETE(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const id = searchParams.get('id');
 
-    if (!id || isNaN(parseInt(id))) {
-      return NextResponse.json({ 
-        error: "Valid ID is required",
-        code: "INVALID_ID" 
-      }, { status: 400 });
+    if (!id) {
+      return NextResponse.json(
+        { error: 'Valid ID is required', code: 'INVALID_ID' },
+        { status: 400 },
+      );
     }
 
-    // Check if university exists
-    const existing = await db.select()
-      .from(universities)
-      .where(eq(universities.id, parseInt(id)))
-      .limit(1);
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const docRef = collection.doc(id);
+    const existing = await docRef.get();
 
-    if (existing.length === 0) {
-      return NextResponse.json({ 
-        error: 'University not found',
-        code: "UNIVERSITY_NOT_FOUND" 
-      }, { status: 404 });
+    if (!existing.exists) {
+      return NextResponse.json(
+        { error: 'University not found', code: 'UNIVERSITY_NOT_FOUND' },
+        { status: 404 },
+      );
     }
 
-    const deleted = await db.delete(universities)
-      .where(eq(universities.id, parseInt(id)))
-      .returning();
+    const existingData = mapDoc(existing);
+    await docRef.delete();
 
-    return NextResponse.json({ 
-      message: 'University deleted successfully',
-      university: deleted[0] 
-    }, { status: 200 });
-
+    return NextResponse.json(
+      { message: 'University deleted successfully', university: existingData },
+      { status: 200 },
+    );
   } catch (error) {
-    console.error('DELETE error:', error);
-    return NextResponse.json({ 
-      error: 'Internal server error: ' + error 
-    }, { status: 500 });
+    console.error('DELETE /api/universities error:', error);
+    return NextResponse.json(
+      { error: 'Internal server error: ' + error },
+      { status: 500 },
+    );
   }
 }

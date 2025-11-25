@@ -1,10 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { messages, conversations, user } from '@/db/schema';
-import { eq, and, or, desc } from 'drizzle-orm';
+import { adminDb, adminAuth } from '@/lib/firebaseAdmin';
 import { getCurrentUser } from '@/lib/auth';
 
 const VALID_MESSAGE_TYPES = ['text', 'file', 'image'];
+const COLLECTION_NAME = 'messages';
+
+function mapDoc(doc: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirestore.DocumentSnapshot) {
+  const data = doc.data();
+  if (!data) return null;
+  return {
+    id: doc.id,
+    conversationId: data.conversationId ?? null,
+    senderId: data.senderId ?? null,
+    receiverId: data.receiverId ?? null,
+    content: data.content ?? null,
+    messageType: data.messageType ?? 'text',
+    fileUrl: data.fileUrl ?? null,
+    isRead: data.isRead ?? false,
+    createdAt: data.createdAt ?? null,
+    updatedAt: data.updatedAt ?? null,
+  };
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -17,64 +33,41 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(parseInt(searchParams.get('limit') || '50'), 200);
     const offset = parseInt(searchParams.get('offset') || '0');
 
+    const collection = adminDb.collection(COLLECTION_NAME);
+
     // Single message fetch
     if (id) {
-      const messageId = parseInt(id);
-      if (isNaN(messageId)) {
-        return NextResponse.json({ 
-          error: 'Valid message ID is required',
-          code: 'INVALID_ID' 
-        }, { status: 400 });
-      }
-
-      const message = await db.select()
-        .from(messages)
-        .where(eq(messages.id, messageId))
-        .limit(1);
-
-      if (message.length === 0) {
+      const doc = await collection.doc(id).get();
+      if (!doc.exists) {
         return NextResponse.json({ 
           error: 'Message not found',
           code: 'MESSAGE_NOT_FOUND' 
         }, { status: 404 });
       }
-
-      return NextResponse.json(message[0], { status: 200 });
+      return NextResponse.json(mapDoc(doc), { status: 200 });
     }
 
-    // List messages with filters
-    let conditions = [];
+    let query: FirebaseFirestore.Query = collection.orderBy('createdAt', 'desc');
 
     if (conversationId) {
-      const convId = parseInt(conversationId);
-      if (!isNaN(convId)) {
-        conditions.push(eq(messages.conversationId, convId));
-      }
+      query = query.where('conversationId', '==', conversationId);
     }
 
     if (senderId) {
-      conditions.push(eq(messages.senderId, senderId));
+      query = query.where('senderId', '==', senderId);
     }
 
     if (receiverId) {
-      conditions.push(eq(messages.receiverId, receiverId));
+      query = query.where('receiverId', '==', receiverId);
     }
 
     if (isReadParam !== null) {
       const isRead = isReadParam === 'true';
-      conditions.push(eq(messages.isRead, isRead));
+      query = query.where('isRead', '==', isRead);
     }
 
-    let query = db.select().from(messages);
-    
-    if (conditions.length > 0) {
-      query = query.where(and(...conditions));
-    }
-
-    const results = await query
-      .orderBy(desc(messages.createdAt))
-      .limit(limit)
-      .offset(offset);
+    const snapshot = await query.limit(limit).offset(offset).get();
+    const results = snapshot.docs.map(mapDoc).filter(Boolean);
 
     return NextResponse.json(results, { status: 200 });
 
@@ -155,9 +148,8 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    // Validate conversationId is a number
-    const convId = parseInt(conversationId);
-    if (isNaN(convId)) {
+    // Validate conversationId is a string
+    if (typeof conversationId !== 'string' || conversationId.trim() === '') {
       return NextResponse.json({ 
         error: 'Valid conversation ID is required',
         code: 'INVALID_CONVERSATION_ID' 
@@ -165,19 +157,17 @@ export async function POST(request: NextRequest) {
     }
 
     // Verify conversation exists and user is a participant
-    const conversation = await db.select()
-      .from(conversations)
-      .where(eq(conversations.id, convId))
-      .limit(1);
-
-    if (conversation.length === 0) {
+    const convColl = adminDb.collection('conversations');
+    const convDoc = await convColl.doc(conversationId).get();
+    if (!convDoc.exists) {
       return NextResponse.json({ 
         error: 'Conversation not found',
         code: 'CONVERSATION_NOT_FOUND' 
       }, { status: 404 });
     }
 
-    const participants = conversation[0].participants as string[];
+    const convData = convDoc.data()!;
+    const participants = convData.participants || [];
     if (!participants.includes(authUser.id)) {
       return NextResponse.json({ 
         error: 'You are not a participant in this conversation',
@@ -185,7 +175,7 @@ export async function POST(request: NextRequest) {
       }, { status: 403 });
     }
 
-    // Verify receiver exists and is a participant
+    // Verify receiver is a participant
     if (!participants.includes(receiverId)) {
       return NextResponse.json({ 
         error: 'Receiver is not a participant in this conversation',
@@ -193,12 +183,10 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    const receiverExists = await db.select()
-      .from(user)
-      .where(eq(user.id, receiverId))
-      .limit(1);
-
-    if (receiverExists.length === 0) {
+    // Verify receiver exists via Firebase Auth
+    try {
+      await adminAuth.getUser(receiverId);
+    } catch {
       return NextResponse.json({ 
         error: 'Receiver user not found',
         code: 'RECEIVER_NOT_FOUND' 
@@ -207,31 +195,27 @@ export async function POST(request: NextRequest) {
 
     const now = new Date().toISOString();
 
-    const newMessage = await db.insert(messages)
-      .values({
-        senderId: senderId.trim(),
-        receiverId: receiverId.trim(),
-        conversationId: convId,
-        encryptedContent: encryptedContent.trim(),
-        encryptedKey: encryptedKey.trim(),
-        messageType: messageType.trim(),
-        isRead: false,
-        readAt: null,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning();
+    const msgColl = adminDb.collection(COLLECTION_NAME);
+    const ref = await msgColl.add({
+      senderId: senderId.trim(),
+      receiverId: receiverId.trim(),
+      conversationId,
+      content: encryptedContent.trim(),
+      messageType: messageType.trim(),
+      isRead: false,
+      createdAt: now,
+      updatedAt: now,
+    });
 
     // Update conversation with last message info
-    await db.update(conversations)
-      .set({
-        lastMessage: `${messageType === 'text' ? 'Message' : messageType === 'image' ? 'Image' : 'File'}`,
-        lastMessageAt: now,
-        updatedAt: now,
-      })
-      .where(eq(conversations.id, convId));
+    await convColl.doc(conversationId).update({
+      lastMessage: `${messageType === 'text' ? 'Message' : messageType === 'image' ? 'Image' : 'File'}`,
+      lastMessageAt: now,
+      updatedAt: now,
+    });
 
-    return NextResponse.json(newMessage[0], { status: 201 });
+    const created = await ref.get();
+    return NextResponse.json(mapDoc(created), { status: 201 });
 
   } catch (error) {
     console.error('POST error:', error);
@@ -258,26 +242,9 @@ export async function PUT(request: NextRequest) {
       }, { status: 400 });
     }
 
-    const messageId = parseInt(id);
-    if (isNaN(messageId)) {
-      return NextResponse.json({ 
-        error: 'Valid message ID is required',
-        code: 'INVALID_ID' 
-      }, { status: 400 });
-    }
-
-    // Check if message exists and user is the receiver
-    const existingMessage = await db.select()
-      .from(messages)
-      .where(
-        and(
-          eq(messages.id, messageId),
-          eq(messages.receiverId, authUser.id)
-        )
-      )
-      .limit(1);
-
-    if (existingMessage.length === 0) {
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const doc = await collection.doc(id).get();
+    if (!doc.exists || doc.data()?.receiverId !== authUser.id) {
       return NextResponse.json({ 
         error: 'Message not found or you are not authorized to mark it as read',
         code: 'MESSAGE_NOT_FOUND' 
@@ -285,29 +252,13 @@ export async function PUT(request: NextRequest) {
     }
 
     const now = new Date().toISOString();
+    await collection.doc(id).update({
+      isRead: true,
+      updatedAt: now,
+    });
 
-    const updated = await db.update(messages)
-      .set({
-        isRead: true,
-        readAt: now,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(messages.id, messageId),
-          eq(messages.receiverId, authUser.id)
-        )
-      )
-      .returning();
-
-    if (updated.length === 0) {
-      return NextResponse.json({ 
-        error: 'Failed to update message',
-        code: 'UPDATE_FAILED' 
-      }, { status: 500 });
-    }
-
-    return NextResponse.json(updated[0], { status: 200 });
+    const updated = await collection.doc(id).get();
+    return NextResponse.json(mapDoc(updated), { status: 200 });
 
   } catch (error) {
     console.error('PUT error:', error);
@@ -334,59 +285,28 @@ export async function DELETE(request: NextRequest) {
       }, { status: 400 });
     }
 
-    const messageId = parseInt(id);
-    if (isNaN(messageId)) {
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const doc = await collection.doc(id).get();
+    if (!doc.exists) {
       return NextResponse.json({ 
-        error: 'Valid message ID is required',
-        code: 'INVALID_ID' 
-      }, { status: 400 });
-    }
-
-    // Check if message exists and user is sender or receiver
-    const existingMessage = await db.select()
-      .from(messages)
-      .where(
-        and(
-          eq(messages.id, messageId),
-          or(
-            eq(messages.senderId, authUser.id),
-            eq(messages.receiverId, authUser.id)
-          )
-        )
-      )
-      .limit(1);
-
-    if (existingMessage.length === 0) {
-      return NextResponse.json({ 
-        error: 'Message not found or you are not authorized to delete it',
+        error: 'Message not found',
         code: 'MESSAGE_NOT_FOUND' 
       }, { status: 404 });
     }
 
-    const deleted = await db.delete(messages)
-      .where(
-        and(
-          eq(messages.id, messageId),
-          or(
-            eq(messages.senderId, authUser.id),
-            eq(messages.receiverId, authUser.id)
-          )
-        )
-      )
-      .returning();
-
-    if (deleted.length === 0) {
+    const data = doc.data()!;
+    if (data.senderId !== authUser.id && data.receiverId !== authUser.id) {
       return NextResponse.json({ 
-        error: 'Failed to delete message',
-        code: 'DELETE_FAILED' 
-      }, { status: 500 });
+        error: 'You are not authorized to delete this message',
+        code: 'UNAUTHORIZED_DELETE' 
+      }, { status: 403 });
     }
 
+    await collection.doc(id).delete();
     return NextResponse.json({
       message: 'Message deleted successfully',
-      deletedMessage: deleted[0]
+      deletedMessage: mapDoc(doc)
     }, { status: 200 });
-
   } catch (error) {
     console.error('DELETE error:', error);
     return NextResponse.json({ 

@@ -1,7 +1,48 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { user, userProfiles } from '@/db/schema';
-import { eq, like, and, or, desc } from 'drizzle-orm';
+import { adminDb, adminAuth } from '@/lib/firebaseAdmin';
+
+const USERS_COLLECTION = 'users';
+const PROFILES_COLLECTION = 'userProfiles';
+
+function mapUserDoc(doc: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirestore.DocumentSnapshot) {
+  const data = doc.data();
+  if (!data) return null;
+  return {
+    id: doc.id,
+    name: data.name ?? null,
+    email: data.email ?? null,
+    emailVerified: data.emailVerified ?? false,
+    image: data.image ?? null,
+    createdAt: data.createdAt ?? null,
+    updatedAt: data.updatedAt ?? null,
+  };
+}
+
+function mapProfileDoc(doc: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirestore.DocumentSnapshot) {
+  const data = doc.data();
+  if (!data) return null;
+  return {
+    id: doc.id,
+    userId: data.userId ?? null,
+    role: data.role ?? null,
+    universityId: data.universityId ?? null,
+    graduationYear: data.graduationYear ?? null,
+    major: data.major ?? null,
+    degree: data.degree ?? null,
+    currentPosition: data.currentPosition ?? null,
+    company: data.company ?? null,
+    location: data.location ?? null,
+    bio: data.bio ?? null,
+    skills: data.skills ?? [],
+    interests: data.interests ?? [],
+    phoneNumber: data.phoneNumber ?? null,
+    linkedinUrl: data.linkedinUrl ?? null,
+    isVerified: data.isVerified ?? false,
+    verificationStatus: data.verificationStatus ?? null,
+    createdAt: data.createdAt ?? null,
+    updatedAt: data.updatedAt ?? null,
+  };
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -15,178 +56,63 @@ export async function GET(request: NextRequest) {
 
     // Single user by ID
     if (id) {
-      const users = await db
-        .select({
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          emailVerified: user.emailVerified,
-          image: user.image,
-          createdAt: user.createdAt,
-          updatedAt: user.updatedAt,
-          profile: {
-            id: userProfiles.id,
-            userId: userProfiles.userId,
-            role: userProfiles.role,
-            universityId: userProfiles.universityId,
-            graduationYear: userProfiles.graduationYear,
-            major: userProfiles.major,
-            degree: userProfiles.degree,
-            currentPosition: userProfiles.currentPosition,
-            company: userProfiles.company,
-            location: userProfiles.location,
-            bio: userProfiles.bio,
-            skills: userProfiles.skills,
-            interests: userProfiles.interests,
-            phoneNumber: userProfiles.phoneNumber,
-            linkedinUrl: userProfiles.linkedinUrl,
-            isVerified: userProfiles.isVerified,
-            verificationStatus: userProfiles.verificationStatus,
-            createdAt: userProfiles.createdAt,
-            updatedAt: userProfiles.updatedAt,
-          },
-        })
-        .from(user)
-        .leftJoin(userProfiles, eq(user.id, userProfiles.userId))
-        .where(eq(user.id, id))
-        .limit(1);
-
-      if (users.length === 0) {
+      const userDoc = await adminDb.collection(USERS_COLLECTION).doc(id).get();
+      if (!userDoc.exists) {
         return NextResponse.json(
           { error: 'User not found', code: 'USER_NOT_FOUND' },
           { status: 404 }
         );
       }
 
-      const userData = users[0];
-      const result = {
-        ...userData,
-        profile: userData.profile.id ? userData.profile : null,
-      };
+      const userData = mapUserDoc(userDoc);
+      const profileDoc = await adminDb.collection(PROFILES_COLLECTION).where('userId', '==', id).limit(1).get();
+      const profile = !profileDoc.empty ? mapProfileDoc(profileDoc.docs[0]) : null;
 
-      return NextResponse.json(result);
+      return NextResponse.json({ ...userData, profile });
     }
 
     // Single user by email
     if (email) {
-      const users = await db
-        .select({
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          emailVerified: user.emailVerified,
-          image: user.image,
-          createdAt: user.createdAt,
-          updatedAt: user.updatedAt,
-          profile: {
-            id: userProfiles.id,
-            userId: userProfiles.userId,
-            role: userProfiles.role,
-            universityId: userProfiles.universityId,
-            graduationYear: userProfiles.graduationYear,
-            major: userProfiles.major,
-            degree: userProfiles.degree,
-            currentPosition: userProfiles.currentPosition,
-            company: userProfiles.company,
-            location: userProfiles.location,
-            bio: userProfiles.bio,
-            skills: userProfiles.skills,
-            interests: userProfiles.interests,
-            phoneNumber: userProfiles.phoneNumber,
-            linkedinUrl: userProfiles.linkedinUrl,
-            isVerified: userProfiles.isVerified,
-            verificationStatus: userProfiles.verificationStatus,
-            createdAt: userProfiles.createdAt,
-            updatedAt: userProfiles.updatedAt,
-          },
-        })
-        .from(user)
-        .leftJoin(userProfiles, eq(user.id, userProfiles.userId))
-        .where(eq(user.email, email))
-        .limit(1);
-
-      if (users.length === 0) {
+      const userSnapshot = await adminAuth.getUserByEmail(email);
+      if (!userSnapshot) {
         return NextResponse.json(
           { error: 'User not found', code: 'USER_NOT_FOUND' },
           { status: 404 }
         );
       }
 
-      const userData = users[0];
-      const result = {
-        ...userData,
-        profile: userData.profile.id ? userData.profile : null,
-      };
+      const userDoc = await adminDb.collection(USERS_COLLECTION).doc(userSnapshot.uid).get();
+      const userData = mapUserDoc(userDoc);
+      const profileDoc = await adminDb.collection(PROFILES_COLLECTION).where('userId', '==', userSnapshot.uid).limit(1).get();
+      const profile = !profileDoc.empty ? mapProfileDoc(profileDoc.docs[0]) : null;
 
-      return NextResponse.json(result);
+      return NextResponse.json({ ...userData, profile });
     }
 
     // List users with filters
-    let query = db
-      .select({
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        emailVerified: user.emailVerified,
-        image: user.image,
-        createdAt: user.createdAt,
-        updatedAt: user.updatedAt,
-        profile: {
-          id: userProfiles.id,
-          userId: userProfiles.userId,
-          role: userProfiles.role,
-          universityId: userProfiles.universityId,
-          graduationYear: userProfiles.graduationYear,
-          major: userProfiles.major,
-          degree: userProfiles.degree,
-          currentPosition: userProfiles.currentPosition,
-          company: userProfiles.company,
-          location: userProfiles.location,
-          bio: userProfiles.bio,
-          skills: userProfiles.skills,
-          interests: userProfiles.interests,
-          phoneNumber: userProfiles.phoneNumber,
-          linkedinUrl: userProfiles.linkedinUrl,
-          isVerified: userProfiles.isVerified,
-          verificationStatus: userProfiles.verificationStatus,
-          createdAt: userProfiles.createdAt,
-          updatedAt: userProfiles.updatedAt,
-        },
-      })
-      .from(user)
-      .leftJoin(userProfiles, eq(user.id, userProfiles.userId));
+    let query: FirebaseFirestore.Query = adminDb.collection(USERS_COLLECTION).orderBy('createdAt', 'desc');
+    const usersSnapshot = await query.limit(limit).offset(offset).get();
+    const users = usersSnapshot.docs.map(mapUserDoc).filter(Boolean);
 
-    // Build WHERE conditions
-    const conditions = [];
+    // Attach profiles and apply filters in-memory
+    const results = [];
+    for (const user of users) {
+      const profileSnapshot = await adminDb.collection(PROFILES_COLLECTION).where('userId', '==', user.id).limit(1).get();
+      const profile = !profileSnapshot.empty ? mapProfileDoc(profileSnapshot.docs[0]) : null;
 
-    if (role) {
-      conditions.push(eq(userProfiles.role, role));
+      // Apply role filter if specified
+      if (role && (!profile || profile.role !== role)) continue;
+
+      // Apply search filter if specified
+      if (search) {
+        const lower = search.toLowerCase();
+        const matchesName = user.name && user.name.toLowerCase().includes(lower);
+        const matchesEmail = user.email && user.email.toLowerCase().includes(lower);
+        if (!matchesName && !matchesEmail) continue;
+      }
+
+      results.push({ ...user, profile });
     }
-
-    if (search) {
-      conditions.push(
-        or(
-          like(user.name, `%${search}%`),
-          like(user.email, `%${search}%`)
-        )
-      );
-    }
-
-    if (conditions.length > 0) {
-      query = query.where(and(...conditions));
-    }
-
-    // Execute query with ordering and pagination
-    const users = await query
-      .orderBy(desc(user.createdAt))
-      .limit(limit)
-      .offset(offset);
-
-    // Transform results to handle null profiles
-    const results = users.map((userData) => ({
-      ...userData,
-      profile: userData.profile.id ? userData.profile : null,
-    }));
 
     return NextResponse.json(results);
   } catch (error) {
@@ -228,13 +154,8 @@ export async function PUT(request: NextRequest) {
     }
 
     // Build update object with only provided fields
-    const updateData: {
-      name?: string;
-      email?: string;
-      emailVerified?: boolean;
-      updatedAt: Date;
-    } = {
-      updatedAt: new Date(),
+    const updateData: any = {
+      updatedAt: new Date().toISOString(),
     };
 
     if (name !== undefined) {
@@ -271,63 +192,15 @@ export async function PUT(request: NextRequest) {
     }
 
     // Update user
-    const updatedUser = await db
-      .update(user)
-      .set(updateData)
-      .where(eq(user.id, id))
-      .returning();
+    await adminDb.collection(USERS_COLLECTION).doc(id).update(updateData);
+    const updatedDoc = await adminDb.collection(USERS_COLLECTION).doc(id).get();
+    const userData = mapUserDoc(updatedDoc);
+    
+    // Fetch profile
+    const profileDoc = await adminDb.collection(PROFILES_COLLECTION).where('userId', '==', id).limit(1).get();
+    const profile = !profileDoc.empty ? mapProfileDoc(profileDoc.docs[0]) : null;
 
-    if (updatedUser.length === 0) {
-      return NextResponse.json(
-        { error: 'Failed to update user', code: 'UPDATE_FAILED' },
-        { status: 500 }
-      );
-    }
-
-    // Fetch updated user with profile
-    const users = await db
-      .select({
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        emailVerified: user.emailVerified,
-        image: user.image,
-        createdAt: user.createdAt,
-        updatedAt: user.updatedAt,
-        profile: {
-          id: userProfiles.id,
-          userId: userProfiles.userId,
-          role: userProfiles.role,
-          universityId: userProfiles.universityId,
-          graduationYear: userProfiles.graduationYear,
-          major: userProfiles.major,
-          degree: userProfiles.degree,
-          currentPosition: userProfiles.currentPosition,
-          company: userProfiles.company,
-          location: userProfiles.location,
-          bio: userProfiles.bio,
-          skills: userProfiles.skills,
-          interests: userProfiles.interests,
-          phoneNumber: userProfiles.phoneNumber,
-          linkedinUrl: userProfiles.linkedinUrl,
-          isVerified: userProfiles.isVerified,
-          verificationStatus: userProfiles.verificationStatus,
-          createdAt: userProfiles.createdAt,
-          updatedAt: userProfiles.updatedAt,
-        },
-      })
-      .from(user)
-      .leftJoin(userProfiles, eq(user.id, userProfiles.userId))
-      .where(eq(user.id, id))
-      .limit(1);
-
-    const userData = users[0];
-    const result = {
-      ...userData,
-      profile: userData.profile.id ? userData.profile : null,
-    };
-
-    return NextResponse.json(result);
+    return NextResponse.json({ ...userData, profile });
   } catch (error) {
     console.error('PUT error:', error);
     return NextResponse.json(
@@ -350,35 +223,24 @@ export async function DELETE(request: NextRequest) {
     }
 
     // Check if user exists
-    const existingUser = await db
-      .select()
-      .from(user)
-      .where(eq(user.id, id))
-      .limit(1);
-
-    if (existingUser.length === 0) {
+    const userDoc = await adminDb.collection(USERS_COLLECTION).doc(id).get();
+    if (!userDoc.exists) {
       return NextResponse.json(
         { error: 'User not found', code: 'USER_NOT_FOUND' },
         { status: 404 }
       );
     }
 
-    // Delete user (cascade will handle related records)
-    const deleted = await db
-      .delete(user)
-      .where(eq(user.id, id))
-      .returning();
-
-    if (deleted.length === 0) {
-      return NextResponse.json(
-        { error: 'Failed to delete user', code: 'DELETE_FAILED' },
-        { status: 500 }
-      );
-    }
+    // Delete user profile if exists
+    const profileSnapshot = await adminDb.collection(PROFILES_COLLECTION).where('userId', '==', id).get();
+    const batch = adminDb.batch();
+    profileSnapshot.docs.forEach(doc => batch.delete(doc.ref));
+    batch.delete(adminDb.collection(USERS_COLLECTION).doc(id));
+    await batch.commit();
 
     return NextResponse.json({
       message: 'User deleted successfully',
-      deletedUser: deleted[0],
+      deletedUser: mapUserDoc(userDoc),
     });
   } catch (error) {
     console.error('DELETE error:', error);

@@ -1,79 +1,191 @@
 
-"use client"
-import { createAuthClient } from "better-auth/react"
-import { useEffect, useState } from "react"
+"use client";
 
-function getToken(): string {
-  if (typeof window === 'undefined') return "";
-  const ls = window.localStorage?.getItem("bearer_token") || "";
-  const ss = window.sessionStorage?.getItem("bearer_token") || "";
-  return ls || ss || "";
+import { useEffect, useState } from "react";
+import {
+  browserLocalPersistence,
+  browserSessionPersistence,
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  setPersistence,
+  signInWithEmailAndPassword,
+  signOut,
+  updateProfile,
+} from "firebase/auth";
+import type { User } from "firebase/auth";
+import { firebaseAuth } from "./firebaseClient";
+
+type AppUser = {
+  id: string;
+  name: string | null;
+  email: string | null;
+  image?: string | null;
+};
+
+type Session = {
+  user: AppUser | null;
+};
+
+type AuthError = {
+  code: string;
+  message: string;
+};
+
+type SignInEmailArgs = {
+  email: string;
+  password: string;
+  rememberMe?: boolean;
+  callbackURL?: string;
+};
+
+type SignUpEmailArgs = {
+  email: string;
+  password: string;
+  name?: string;
+};
+
+function mapFirebaseUserToSession(user: User | null): Session | null {
+  if (!user) return null;
+  return {
+    user: {
+      id: user.uid,
+      name: user.displayName ?? null,
+      email: user.email ?? null,
+      image: user.photoURL ?? null,
+    },
+  };
 }
 
-function shouldRemember(): boolean {
-  if (typeof window === 'undefined') return false;
-  return window.localStorage?.getItem("remember_me") === "true";
-}
-
-export const authClient = createAuthClient({
-   baseURL: typeof window !== 'undefined' ? window.location.origin : process.env.NEXT_PUBLIC_SITE_URL,
-  fetchOptions: {
-      headers: {
-        Authorization: `Bearer ${typeof window !== 'undefined' ? getToken() : ""}`,
-      },
-      onSuccess: (ctx) => {
-          const authToken = ctx.response.headers.get("set-auth-token")
-          if (authToken && typeof window !== 'undefined'){
-            if (shouldRemember()) {
-              window.localStorage.setItem("bearer_token", authToken);
-              window.sessionStorage.removeItem("bearer_token");
-            } else {
-              window.sessionStorage.setItem("bearer_token", authToken);
-              window.localStorage.removeItem("bearer_token");
-            }
-          }
-      }
+async function storeIdToken(user: User | null) {
+  if (typeof window === "undefined") return;
+  if (!user) {
+    window.localStorage.removeItem("bearer_token");
+    return;
   }
-});
+  const token = await user.getIdToken();
+  window.localStorage.setItem("bearer_token", token);
+}
 
-type SessionData = ReturnType<typeof authClient.useSession>
-
-export function useSession(): SessionData {
-   const [session, setSession] = useState<any>(null);
-   const [isPending, setIsPending] = useState(true);
-   const [isRefetching, setIsRefetching] = useState(false);
-   const [error, setError] = useState<any>(null);
-
-   const refetch = () => {
-      setIsRefetching(true);
-      setError(null);
-      fetchSession();
-   };
-
-   const fetchSession = async () => {
+export const authClient = {
+  signIn: {
+    email: async ({ email, password, rememberMe }: SignInEmailArgs) => {
       try {
-         const res = await authClient.getSession({
-            fetchOptions: {
-               auth: {
-                  type: "Bearer",
-                  token: typeof window !== 'undefined' ? getToken() : "",
-               },
-            },
-         });
-         setSession(res.data);
-         setError(null);
-      } catch (err) {
-         setSession(null);
-         setError(err);
-      } finally {
-         setIsPending(false);
-         setIsRefetching(false);
+        const persistence = rememberMe
+          ? browserLocalPersistence
+          : browserSessionPersistence;
+        await setPersistence(firebaseAuth, persistence);
+
+        const cred = await signInWithEmailAndPassword(
+          firebaseAuth,
+          email,
+          password,
+        );
+        await storeIdToken(cred.user);
+        const session = mapFirebaseUserToSession(cred.user);
+        return { data: session, error: null as AuthError | null };
+      } catch (error: any) {
+        const authError: AuthError = {
+          code: error?.code || "AUTH_SIGN_IN_ERROR",
+          message: error?.message || "Failed to sign in",
+        };
+        return { data: null, error: authError };
       }
-   };
+    },
+  },
+  signUp: {
+    email: async ({ email, password, name }: SignUpEmailArgs) => {
+      try {
+        const cred = await createUserWithEmailAndPassword(
+          firebaseAuth,
+          email,
+          password,
+        );
 
-   useEffect(() => {
-      fetchSession();
-   }, []);
+        if (name) {
+          await updateProfile(cred.user, { displayName: name });
+        }
 
-   return { data: session, isPending, isRefetching, error, refetch };
+        await storeIdToken(cred.user);
+        const session = mapFirebaseUserToSession(cred.user);
+        return { data: session, error: null as AuthError | null };
+      } catch (error: any) {
+        const authError: AuthError = {
+          code: error?.code || "AUTH_SIGN_UP_ERROR",
+          message: error?.message || "Failed to sign up",
+        };
+        return { data: null, error: authError };
+      }
+    },
+  },
+  signOut: async () => {
+    try {
+      await signOut(firebaseAuth);
+      if (typeof window !== "undefined") {
+        window.localStorage.removeItem("bearer_token");
+      }
+      return { error: null as AuthError | null };
+    } catch (error: any) {
+      const authError: AuthError = {
+        code: error?.code || "AUTH_SIGN_OUT_ERROR",
+        message: error?.message || "Failed to sign out",
+      };
+      return { error: authError };
+    }
+  },
+};
+
+type UseSessionResult = {
+  data: Session | null;
+  isPending: boolean;
+  isRefetching: boolean;
+  error: any;
+  refetch: () => void;
+};
+
+export function useSession(): UseSessionResult {
+  const [session, setSession] = useState<Session | null>(null);
+  const [isPending, setIsPending] = useState(true);
+  const [isRefetching, setIsRefetching] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  const syncFromCurrentUser = async () => {
+    try {
+      const user = firebaseAuth.currentUser;
+      await storeIdToken(user);
+      setSession(mapFirebaseUserToSession(user));
+      setError(null);
+    } catch (err) {
+      setError(err);
+      setSession(null);
+    } finally {
+      setIsPending(false);
+      setIsRefetching(false);
+    }
+  };
+
+  const refetch = () => {
+    setIsRefetching(true);
+    setError(null);
+    syncFromCurrentUser();
+  };
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
+      try {
+        await storeIdToken(user);
+        setSession(mapFirebaseUserToSession(user));
+        setError(null);
+      } catch (err) {
+        setError(err);
+        setSession(null);
+      } finally {
+        setIsPending(false);
+        setIsRefetching(false);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  return { data: session, isPending, isRefetching, error, refetch };
 }

@@ -1,11 +1,32 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { credentials, universities } from '@/db/schema';
-import { eq, like, and, or, desc, asc } from 'drizzle-orm';
+import { adminDb } from '@/lib/firebaseAdmin';
 import { getCurrentUser } from '@/lib/auth';
 import { uploadJSONToIPFS } from '@/lib/ipfs';
 
 const VALID_CREDENTIAL_TYPES = ['degree', 'certificate', 'exam'] as const;
+const COLLECTION_NAME = 'credentials';
+
+function mapDoc(doc: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirestore.DocumentSnapshot) {
+  const data = doc.data();
+  if (!data) return null;
+  return {
+    id: doc.id,
+    userId: data.userId ?? null,
+    universityId: data.universityId ?? null,
+    credentialType: data.credentialType ?? null,
+    title: data.title ?? null,
+    issuerName: data.issuerName ?? null,
+    issueDate: data.issueDate ?? null,
+    completionDate: data.completionDate ?? null,
+    verificationHash: data.verificationHash ?? null,
+    metadata: data.metadata ?? null,
+    isVerifiedOnChain: data.isVerifiedOnChain ?? false,
+    blockchainTxHash: data.blockchainTxHash ?? null,
+    ipfsHash: data.ipfsHash ?? null,
+    createdAt: data.createdAt ?? null,
+    updatedAt: data.updatedAt ?? null,
+  };
+}
 
 function isValidCredentialType(type: string): type is typeof VALID_CREDENTIAL_TYPES[number] {
   return VALID_CREDENTIAL_TYPES.includes(type as any);
@@ -28,45 +49,28 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(parseInt(searchParams.get('limit') || '10'), 100);
     const offset = parseInt(searchParams.get('offset') || '0');
 
+    const collection = adminDb.collection(COLLECTION_NAME);
+
     // Single credential by ID
     if (id) {
-      if (isNaN(parseInt(id))) {
-        return NextResponse.json({ 
-          error: 'Valid ID is required',
-          code: 'INVALID_ID' 
-        }, { status: 400 });
-      }
-
-      const credential = await db.select()
-        .from(credentials)
-        .where(eq(credentials.id, parseInt(id)))
-        .limit(1);
-
-      if (credential.length === 0) {
+      const doc = await collection.doc(id).get();
+      if (!doc.exists) {
         return NextResponse.json({ 
           error: 'Credential not found',
           code: 'NOT_FOUND' 
         }, { status: 404 });
       }
-
-      return NextResponse.json(credential[0], { status: 200 });
+      return NextResponse.json(mapDoc(doc), { status: 200 });
     }
 
-    // List credentials with filters
-    const conditions = [];
+    let query: FirebaseFirestore.Query = collection.orderBy('createdAt', 'desc');
 
     if (userId) {
-      conditions.push(eq(credentials.userId, userId));
+      query = query.where('userId', '==', userId);
     }
 
     if (universityId) {
-      if (isNaN(parseInt(universityId))) {
-        return NextResponse.json({ 
-          error: 'Valid university ID is required',
-          code: 'INVALID_UNIVERSITY_ID' 
-        }, { status: 400 });
-      }
-      conditions.push(eq(credentials.universityId, parseInt(universityId)));
+      query = query.where('universityId', '==', universityId);
     }
 
     if (credentialType) {
@@ -76,32 +80,25 @@ export async function GET(request: NextRequest) {
           code: 'INVALID_CREDENTIAL_TYPE' 
         }, { status: 400 });
       }
-      conditions.push(eq(credentials.credentialType, credentialType));
+      query = query.where('credentialType', '==', credentialType);
     }
 
     if (isVerifiedOnChain !== null) {
       const verified = isVerifiedOnChain === 'true';
-      conditions.push(eq(credentials.isVerifiedOnChain, verified));
+      query = query.where('isVerifiedOnChain', '==', verified);
     }
 
+    const snapshot = await query.limit(limit).offset(offset).get();
+    let results = snapshot.docs.map(mapDoc).filter(Boolean);
+
+    // In-memory text search if needed
     if (search) {
-      const searchCondition = or(
-        like(credentials.title, `%${search}%`),
-        like(credentials.description, `%${search}%`)
+      const lower = search.toLowerCase();
+      results = results.filter(c => 
+        (c.title && c.title.toLowerCase().includes(lower)) ||
+        (c.issuerName && c.issuerName.toLowerCase().includes(lower))
       );
-      conditions.push(searchCondition!);
     }
-
-    let query = db.select().from(credentials);
-    
-    if (conditions.length > 0) {
-      query = query.where(and(...conditions));
-    }
-
-    const results = await query
-      .orderBy(desc(credentials.createdAt))
-      .limit(limit)
-      .offset(offset);
 
     return NextResponse.json(results, { status: 200 });
 
@@ -151,13 +148,6 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    if (isNaN(parseInt(universityId))) {
-      return NextResponse.json({ 
-        error: 'Valid university ID is required',
-        code: 'INVALID_UNIVERSITY_ID' 
-      }, { status: 400 });
-    }
-
     if (!credentialType) {
       return NextResponse.json({ 
         error: 'Credential type is required',
@@ -201,12 +191,8 @@ export async function POST(request: NextRequest) {
     }
 
     // Verify university exists
-    const university = await db.select()
-      .from(universities)
-      .where(eq(universities.id, parseInt(universityId)))
-      .limit(1);
-
-    if (university.length === 0) {
+    const uniDoc = await adminDb.collection('universities').doc(universityId).get();
+    if (!uniDoc.exists) {
       return NextResponse.json({ 
         error: 'University not found',
         code: 'UNIVERSITY_NOT_FOUND' 
@@ -244,25 +230,24 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const newCredential = await db.insert(credentials)
-      .values({
-        userId: user.id,
-        universityId: parseInt(universityId),
-        credentialType: credentialType,
-        title: title.trim(),
-        description: description ? description.trim() : null,
-        issueDate,
-        expiryDate: expiryDate || null,
-        blockchainTxHash: blockchainTxHash || null,
-        isVerifiedOnChain: isVerifiedOnChain ?? false,
-        ipfsHash: finalIpfsHash,
-        metadata: metadata ? JSON.stringify(metadata) : null,
-        createdAt: now,
-        updatedAt: now
-      })
-      .returning();
+    const newCredential = await adminDb.collection(COLLECTION_NAME).add({
+      userId: user.id,
+      universityId,
+      credentialType,
+      title: title.trim(),
+      issuerName: uniDoc.data()?.name || null,
+      issueDate,
+      completionDate: expiryDate || null,
+      blockchainTxHash: blockchainTxHash || null,
+      isVerifiedOnChain: isVerifiedOnChain ?? false,
+      ipfsHash: finalIpfsHash,
+      metadata: metadata || null,
+      createdAt: now,
+      updatedAt: now
+    });
 
-    return NextResponse.json(newCredential[0], { status: 201 });
+    const created = await newCredential.get();
+    return NextResponse.json(mapDoc(created), { status: 201 });
 
   } catch (error) {
     console.error('POST error:', error);
@@ -282,11 +267,20 @@ export async function PUT(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const id = searchParams.get('id');
 
-    if (!id || isNaN(parseInt(id))) {
+    if (!id) {
       return NextResponse.json({ 
         error: 'Valid ID is required',
         code: 'INVALID_ID' 
       }, { status: 400 });
+    }
+
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const doc = await collection.doc(id).get();
+    if (!doc.exists || doc.data()?.userId !== user.id) {
+      return NextResponse.json({ 
+        error: 'Credential not found or unauthorized',
+        code: 'NOT_FOUND' 
+      }, { status: 404 });
     }
 
     const body = await request.json();
@@ -299,60 +293,21 @@ export async function PUT(request: NextRequest) {
       }, { status: 400 });
     }
 
-    // Check if credential exists and belongs to user
-    const existing = await db.select()
-      .from(credentials)
-      .where(and(
-        eq(credentials.id, parseInt(id)),
-        eq(credentials.userId, user.id)
-      ))
-      .limit(1);
-
-    if (existing.length === 0) {
-      return NextResponse.json({ 
-        error: 'Credential not found',
-        code: 'NOT_FOUND' 
-      }, { status: 404 });
-    }
-
-    const { 
-      universityId, 
-      credentialType, 
-      title, 
-      description,
-      issueDate,
-      expiryDate,
-      blockchainTxHash,
-      isVerifiedOnChain,
-      ipfsHash,
-      metadata
-    } = body;
-
     // Validate updates
-    const updates: any = {};
+    const updates: any = {
+      updatedAt: new Date().toISOString(),
+    };
 
     if (universityId !== undefined) {
-      if (isNaN(parseInt(universityId))) {
-        return NextResponse.json({ 
-          error: 'Valid university ID is required',
-          code: 'INVALID_UNIVERSITY_ID' 
-        }, { status: 400 });
-      }
-
-      // Verify university exists
-      const university = await db.select()
-        .from(universities)
-        .where(eq(universities.id, parseInt(universityId)))
-        .limit(1);
-
-      if (university.length === 0) {
+      const uniDoc = await adminDb.collection('universities').doc(universityId).get();
+      if (!uniDoc.exists) {
         return NextResponse.json({ 
           error: 'University not found',
           code: 'UNIVERSITY_NOT_FOUND' 
         }, { status: 400 });
       }
-
-      updates.universityId = parseInt(universityId);
+      updates.universityId = universityId;
+      updates.issuerName = uniDoc.data()?.name || null;
     }
 
     if (credentialType !== undefined) {
@@ -375,10 +330,6 @@ export async function PUT(request: NextRequest) {
       updates.title = title.trim();
     }
 
-    if (description !== undefined) {
-      updates.description = description ? description.trim() : null;
-    }
-
     if (issueDate !== undefined) {
       if (!isValidISODate(issueDate)) {
         return NextResponse.json({ 
@@ -396,7 +347,7 @@ export async function PUT(request: NextRequest) {
           code: 'INVALID_EXPIRY_DATE' 
         }, { status: 400 });
       }
-      updates.expiryDate = expiryDate || null;
+      updates.completionDate = expiryDate || null;
     }
 
     if (blockchainTxHash !== undefined) {
@@ -418,27 +369,12 @@ export async function PUT(request: NextRequest) {
           code: 'INVALID_METADATA' 
         }, { status: 400 });
       }
-      updates.metadata = metadata ? JSON.stringify(metadata) : null;
+      updates.metadata = metadata;
     }
 
-    updates.updatedAt = new Date().toISOString();
-
-    const updated = await db.update(credentials)
-      .set(updates)
-      .where(and(
-        eq(credentials.id, parseInt(id)),
-        eq(credentials.userId, user.id)
-      ))
-      .returning();
-
-    if (updated.length === 0) {
-      return NextResponse.json({ 
-        error: 'Credential not found',
-        code: 'NOT_FOUND' 
-      }, { status: 404 });
-    }
-
-    return NextResponse.json(updated[0], { status: 200 });
+    await collection.doc(id).update(updates);
+    const updated = await collection.doc(id).get();
+    return NextResponse.json(mapDoc(updated), { status: 200 });
 
   } catch (error) {
     console.error('PUT error:', error);
@@ -458,48 +394,27 @@ export async function DELETE(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const id = searchParams.get('id');
 
-    if (!id || isNaN(parseInt(id))) {
+    if (!id) {
       return NextResponse.json({ 
         error: 'Valid ID is required',
         code: 'INVALID_ID' 
       }, { status: 400 });
     }
 
-    // Check if credential exists and belongs to user
-    const existing = await db.select()
-      .from(credentials)
-      .where(and(
-        eq(credentials.id, parseInt(id)),
-        eq(credentials.userId, user.id)
-      ))
-      .limit(1);
-
-    if (existing.length === 0) {
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const doc = await collection.doc(id).get();
+    if (!doc.exists || doc.data()?.userId !== user.id) {
       return NextResponse.json({ 
         error: 'Credential not found',
         code: 'NOT_FOUND' 
       }, { status: 404 });
     }
 
-    const deleted = await db.delete(credentials)
-      .where(and(
-        eq(credentials.id, parseInt(id)),
-        eq(credentials.userId, user.id)
-      ))
-      .returning();
-
-    if (deleted.length === 0) {
-      return NextResponse.json({ 
-        error: 'Credential not found',
-        code: 'NOT_FOUND' 
-      }, { status: 404 });
-    }
-
-    return NextResponse.json({ 
+    await collection.doc(id).delete();
+    return NextResponse.json({
       message: 'Credential deleted successfully',
-      credential: deleted[0]
+      credential: mapDoc(doc)
     }, { status: 200 });
-
   } catch (error) {
     console.error('DELETE error:', error);
     return NextResponse.json({ 

@@ -1,16 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { events, eventRegistrations } from '@/db/schema';
-import { eq, and, sql } from 'drizzle-orm';
-import { auth } from '@/lib/auth';
+import { adminDb } from '@/lib/firebaseAdmin';
+import { getCurrentUser } from '@/lib/auth';
 
 export async function POST(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    const session = await auth.api.getSession({ headers: request.headers });
-    if (!session?.user) {
+    const authUser = await getCurrentUser(request);
+    if (!authUser) {
       return NextResponse.json(
         { error: 'Authentication required', code: 'AUTH_REQUIRED' },
         { status: 401 }
@@ -19,29 +17,22 @@ export async function POST(
 
     const { id } = params;
 
-    if (!id || isNaN(parseInt(id))) {
+    if (!id) {
       return NextResponse.json(
         { error: 'Valid event ID is required', code: 'INVALID_ID' },
         { status: 400 }
       );
     }
 
-    const eventId = parseInt(id);
-
-    const event = await db
-      .select()
-      .from(events)
-      .where(eq(events.id, eventId))
-      .limit(1);
-
-    if (event.length === 0) {
+    const eventsColl = adminDb.collection('events');
+    const eventDoc = await eventsColl.doc(id).get();
+    if (!eventDoc.exists) {
       return NextResponse.json(
         { error: 'Event not found', code: 'EVENT_NOT_FOUND' },
         { status: 404 }
       );
     }
-
-    const eventData = event[0];
+    const eventData = eventDoc.data()!;
 
     if (eventData.status !== 'upcoming') {
       return NextResponse.json(
@@ -53,18 +44,13 @@ export async function POST(
       );
     }
 
-    const existingRegistration = await db
-      .select()
-      .from(eventRegistrations)
-      .where(
-        and(
-          eq(eventRegistrations.eventId, eventId),
-          eq(eventRegistrations.userId, session.user.id)
-        )
-      )
-      .limit(1);
-
-    if (existingRegistration.length > 0) {
+    const regsColl = adminDb.collection('eventRegistrations');
+    const existingReg = await regsColl
+      .where('eventId', '==', id)
+      .where('userId', '==', authUser.id)
+      .limit(1)
+      .get();
+    if (!existingReg.empty) {
       return NextResponse.json(
         {
           error: 'Already registered for this event',
@@ -74,8 +60,9 @@ export async function POST(
       );
     }
 
-    if (eventData.maxAttendees !== null) {
-      if (eventData.currentAttendees >= eventData.maxAttendees) {
+    if (eventData.maxAttendees != null) {
+      const currentCount = eventData.currentAttendees ?? 0;
+      if (currentCount >= eventData.maxAttendees) {
         return NextResponse.json(
           { error: 'Event is full', code: 'EVENT_FULL' },
           { status: 400 }
@@ -99,27 +86,21 @@ export async function POST(
 
     const currentTimestamp = new Date().toISOString();
 
-    const newRegistration = await db
-      .insert(eventRegistrations)
-      .values({
-        eventId: eventId,
-        userId: session.user.id,
-        registeredAt: currentTimestamp,
-        attendanceStatus: 'registered',
-        createdAt: currentTimestamp,
-        updatedAt: currentTimestamp,
-      })
-      .returning();
+    const regRef = await regsColl.add({
+      eventId: id,
+      userId: authUser.id,
+      registeredAt: currentTimestamp,
+      attendanceStatus: 'registered',
+      createdAt: currentTimestamp,
+      updatedAt: currentTimestamp,
+    });
 
-    await db
-      .update(events)
-      .set({
-        currentAttendees: sql`${events.currentAttendees} + 1`,
-        updatedAt: currentTimestamp,
-      })
-      .where(eq(events.id, eventId));
+    // Increment currentAttendees on the event
+    const newCurrent = (eventData.currentAttendees || 0) + 1;
+    await eventsColl.doc(id).update({ currentAttendees: newCurrent, updatedAt: currentTimestamp });
 
-    return NextResponse.json(newRegistration[0], { status: 201 });
+    const created = await regRef.get();
+    return NextResponse.json({ id: created.id, ...created.data() }, { status: 201 });
   } catch (error) {
     console.error('POST error:', error);
     return NextResponse.json(
@@ -134,8 +115,8 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
-    const session = await auth.api.getSession({ headers: request.headers });
-    if (!session?.user) {
+    const authUser = await getCurrentUser(request);
+    if (!authUser) {
       return NextResponse.json(
         { error: 'Authentication required', code: 'AUTH_REQUIRED' },
         { status: 401 }
@@ -144,47 +125,37 @@ export async function DELETE(
 
     const { id } = params;
 
-    if (!id || isNaN(parseInt(id))) {
+    if (!id) {
       return NextResponse.json(
         { error: 'Valid event ID is required', code: 'INVALID_ID' },
         { status: 400 }
       );
     }
 
-    const eventId = parseInt(id);
+    const regsColl = adminDb.collection('eventRegistrations');
+    const existingReg = await regsColl
+      .where('eventId', '==', id)
+      .where('userId', '==', authUser.id)
+      .limit(1)
+      .get();
 
-    const existingRegistration = await db
-      .select()
-      .from(eventRegistrations)
-      .where(
-        and(
-          eq(eventRegistrations.eventId, eventId),
-          eq(eventRegistrations.userId, session.user.id)
-        )
-      )
-      .limit(1);
-
-    if (existingRegistration.length === 0) {
+    if (existingReg.empty) {
       return NextResponse.json(
         { error: 'Registration not found', code: 'REGISTRATION_NOT_FOUND' },
         { status: 404 }
       );
     }
 
-    const event = await db
-      .select()
-      .from(events)
-      .where(eq(events.id, eventId))
-      .limit(1);
-
-    if (event.length === 0) {
+    const eventsColl = adminDb.collection('events');
+    const eventDoc = await eventsColl.doc(id).get();
+    if (!eventDoc.exists) {
       return NextResponse.json(
         { error: 'Event not found', code: 'EVENT_NOT_FOUND' },
         { status: 404 }
       );
     }
 
-    const eventData = event[0];
+    const eventData = eventDoc.data()!;
 
     if (eventData.status !== 'upcoming') {
       return NextResponse.json(
@@ -196,34 +167,17 @@ export async function DELETE(
       );
     }
 
-    const deletedRegistration = await db
-      .delete(eventRegistrations)
-      .where(
-        and(
-          eq(eventRegistrations.eventId, eventId),
-          eq(eventRegistrations.userId, session.user.id)
-        )
-      )
-      .returning();
+    const regDocId = existingReg.docs[0].id;
+    await regsColl.doc(regDocId).delete();
 
     const currentTimestamp = new Date().toISOString();
-
-    await db
-      .update(events)
-      .set({
-        currentAttendees: sql`CASE 
-          WHEN ${events.currentAttendees} > 0 
-          THEN ${events.currentAttendees} - 1 
-          ELSE 0 
-        END`,
-        updatedAt: currentTimestamp,
-      })
-      .where(eq(events.id, eventId));
+    const newCurrent = Math.max((eventData.currentAttendees || 0) - 1, 0);
+    await eventsColl.doc(id).update({ currentAttendees: newCurrent, updatedAt: currentTimestamp });
 
     return NextResponse.json(
       {
         message: 'Registration cancelled successfully',
-        registration: deletedRegistration[0],
+        registration: { id: regDocId, ...existingReg.docs[0].data() },
       },
       { status: 200 }
     );

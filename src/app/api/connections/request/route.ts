@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { alumniConnections } from '@/db/schema';
-import { eq, and, or } from 'drizzle-orm';
+import { adminDb } from '@/lib/firebaseAdmin';
 
 const VALID_CONNECTION_TYPES = ['mentorship', 'networking', 'collaboration'] as const;
 
@@ -52,24 +50,13 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if connection already exists (in either direction)
-    const existingConnection = await db
-      .select()
-      .from(alumniConnections)
-      .where(
-        or(
-          and(
-            eq(alumniConnections.requesterId, requesterId),
-            eq(alumniConnections.recipientId, recipientId)
-          ),
-          and(
-            eq(alumniConnections.requesterId, recipientId),
-            eq(alumniConnections.recipientId, requesterId)
-          )
-        )
-      )
-      .limit(1);
+    const collection = adminDb.collection('connections');
+    const [asReq, asRec] = await Promise.all([
+      collection.where('requesterId', '==', requesterId).where('recipientId', '==', recipientId).limit(1).get(),
+      collection.where('requesterId', '==', recipientId).where('recipientId', '==', requesterId).limit(1).get(),
+    ]);
 
-    if (existingConnection.length > 0) {
+    if (!asReq.empty || !asRec.empty) {
       return NextResponse.json(
         { error: 'Connection already exists', code: 'CONNECTION_ALREADY_EXISTS' },
         { status: 400 }
@@ -78,24 +65,23 @@ export async function POST(request: NextRequest) {
 
     // Create new connection request
     const now = new Date().toISOString();
-    const newConnection = await db
-      .insert(alumniConnections)
-      .values({
-        requesterId,
-        recipientId,
-        connectionType,
-        message: message || null,
-        status: 'pending',
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning();
+    const ref = await collection.add({
+      requesterId,
+      recipientId,
+      connectionType,
+      message: message || null,
+      status: 'pending',
+      requestedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    });
 
+    const created = await ref.get();
     return NextResponse.json(
       {
         success: true,
         message: 'Connection request sent successfully',
-        connection: newConnection[0],
+        connection: { id: created.id, ...created.data() },
       },
       { status: 201 }
     );

@@ -10,7 +10,7 @@ import { useSession } from "@/lib/auth-client";
 import { toast } from "sonner";
 
 type Post = {
-  id: number;
+  id: string;
   userId: string;
   content: string | null;
   mediaUrl: string | null;
@@ -89,7 +89,6 @@ export default function Feed({ userIdFilter, showComposer = true }: FeedProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId: session.user.id,
           content: content || null,
           mediaDataUrl,
           mediaType,
@@ -138,7 +137,6 @@ export default function Feed({ userIdFilter, showComposer = true }: FeedProps) {
                 {mediaDataUrl && (
                   <div className="rounded border p-2">
                     {mediaType === "image" ? (
-                      // eslint-disable-next-line @next/next/no-img-element
                       <img src={mediaDataUrl} alt="preview" className="max-h-64 object-contain" />
                     ) : (
                       <video src={mediaDataUrl} controls className="max-h-64" />
@@ -176,7 +174,6 @@ export default function Feed({ userIdFilter, showComposer = true }: FeedProps) {
                 {p.mediaUrl && (
                   <div className="rounded overflow-hidden">
                     {p.mediaType === "image" ? (
-                      // eslint-disable-next-line @next/next/no-img-element
                       <img src={p.mediaUrl} alt="media" className="max-h-[480px] w-full object-contain" />
                     ) : (
                       <video src={p.mediaUrl} controls className="w-full max-h-[480px]" />

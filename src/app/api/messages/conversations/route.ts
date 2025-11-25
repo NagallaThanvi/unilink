@@ -1,7 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { conversations } from '@/db/schema';
-import { eq, desc, and, sql } from 'drizzle-orm';
+import { adminDb } from '@/lib/firebaseAdmin';
+
+const COLLECTION_NAME = 'conversations';
+
+function mapDoc(doc: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirestore.DocumentSnapshot) {
+  const data = doc.data();
+  if (!data) return null;
+  return {
+    id: doc.id,
+    participants: data.participants ?? [],
+    isGroupChat: data.isGroupChat ?? false,
+    groupName: data.groupName ?? null,
+    encryptionPublicKeys: data.encryptionPublicKeys ?? {},
+    lastMessage: data.lastMessage ?? null,
+    lastMessageAt: data.lastMessageAt ?? null,
+    createdAt: data.createdAt ?? null,
+    updatedAt: data.updatedAt ?? null,
+  };
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -12,58 +28,35 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(parseInt(searchParams.get('limit') || '20'), 100);
     const offset = parseInt(searchParams.get('offset') || '0');
 
+    const collection = adminDb.collection(COLLECTION_NAME);
+
     // Single conversation by ID
     if (id) {
-      if (!id || isNaN(parseInt(id))) {
-        return NextResponse.json({ 
-          error: "Valid ID is required",
-          code: "INVALID_ID" 
-        }, { status: 400 });
-      }
-
-      const conversation = await db.select()
-        .from(conversations)
-        .where(eq(conversations.id, parseInt(id)))
-        .limit(1);
-
-      if (conversation.length === 0) {
+      const doc = await collection.doc(id).get();
+      if (!doc.exists) {
         return NextResponse.json({ 
           error: 'Conversation not found',
-          code: "CONVERSATION_NOT_FOUND" 
+          code: 'CONVERSATION_NOT_FOUND' 
         }, { status: 404 });
       }
-
-      return NextResponse.json(conversation[0], { status: 200 });
+      return NextResponse.json(mapDoc(doc), { status: 200 });
     }
 
-    // List conversations with filters
-    let query = db.select().from(conversations);
+    let query: FirebaseFirestore.Query = collection.orderBy('lastMessageAt', 'desc');
 
-    const conditions = [];
-
-    // Filter by userId in participants array
+    // Filter by userId in participants array (array-contains)
     if (userId) {
-      conditions.push(sql`json_array_length(json_extract(${conversations.participants}, '$')) > 0 AND EXISTS (
-        SELECT 1 FROM json_each(${conversations.participants}) 
-        WHERE json_each.value = ${userId}
-      )`);
+      query = query.where('participants', 'array-contains', userId);
     }
 
     // Filter by isGroupChat
     if (isGroupChat !== null && isGroupChat !== undefined) {
       const isGroup = isGroupChat === 'true';
-      conditions.push(eq(conversations.isGroupChat, isGroup));
+      query = query.where('isGroupChat', '==', isGroup);
     }
 
-    if (conditions.length > 0) {
-      query = query.where(and(...conditions));
-    }
-
-    // Order by lastMessageAt DESC (most recent first)
-    const results = await query
-      .orderBy(desc(conversations.lastMessageAt))
-      .limit(limit)
-      .offset(offset);
+    const snapshot = await query.limit(limit).offset(offset).get();
+    const results = snapshot.docs.map(mapDoc).filter(Boolean);
 
     return NextResponse.json(results, { status: 200 });
   } catch (error) {
@@ -114,20 +107,20 @@ export async function POST(request: NextRequest) {
 
     const now = new Date().toISOString();
 
-    const newConversation = await db.insert(conversations)
-      .values({
-        participants: participants,
-        isGroupChat: isGroupChat,
-        groupName: groupName || null,
-        encryptionPublicKeys: encryptionPublicKeys || null,
-        lastMessage: null,
-        lastMessageAt: null,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning();
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const ref = await collection.add({
+      participants,
+      isGroupChat,
+      groupName: groupName || null,
+      encryptionPublicKeys: encryptionPublicKeys || {},
+      lastMessage: null,
+      lastMessageAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
 
-    return NextResponse.json(newConversation[0], { status: 201 });
+    const created = await ref.get();
+    return NextResponse.json(mapDoc(created), { status: 201 });
   } catch (error) {
     console.error('POST error:', error);
     return NextResponse.json({ 
@@ -141,28 +134,24 @@ export async function PUT(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const id = searchParams.get('id');
 
-    if (!id || isNaN(parseInt(id))) {
+    if (!id) {
       return NextResponse.json({ 
         error: "Valid ID is required",
         code: "INVALID_ID" 
       }, { status: 400 });
     }
 
-    const body = await request.json();
-    const { lastMessage, lastMessageAt, groupName, encryptionPublicKeys } = body;
-
-    // Check if conversation exists
-    const existing = await db.select()
-      .from(conversations)
-      .where(eq(conversations.id, parseInt(id)))
-      .limit(1);
-
-    if (existing.length === 0) {
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const doc = await collection.doc(id).get();
+    if (!doc.exists) {
       return NextResponse.json({ 
         error: 'Conversation not found',
         code: "CONVERSATION_NOT_FOUND" 
       }, { status: 404 });
     }
+
+    const body = await request.json();
+    const { lastMessage, lastMessageAt, groupName, encryptionPublicKeys } = body;
 
     const updates: any = {
       updatedAt: new Date().toISOString(),
@@ -184,12 +173,9 @@ export async function PUT(request: NextRequest) {
       updates.encryptionPublicKeys = encryptionPublicKeys;
     }
 
-    const updated = await db.update(conversations)
-      .set(updates)
-      .where(eq(conversations.id, parseInt(id)))
-      .returning();
-
-    return NextResponse.json(updated[0], { status: 200 });
+    await collection.doc(id).update(updates);
+    const updated = await collection.doc(id).get();
+    return NextResponse.json(mapDoc(updated), { status: 200 });
   } catch (error) {
     console.error('PUT error:', error);
     return NextResponse.json({ 
@@ -203,33 +189,26 @@ export async function DELETE(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const id = searchParams.get('id');
 
-    if (!id || isNaN(parseInt(id))) {
+    if (!id) {
       return NextResponse.json({ 
         error: "Valid ID is required",
         code: "INVALID_ID" 
       }, { status: 400 });
     }
 
-    // Check if conversation exists
-    const existing = await db.select()
-      .from(conversations)
-      .where(eq(conversations.id, parseInt(id)))
-      .limit(1);
-
-    if (existing.length === 0) {
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const doc = await collection.doc(id).get();
+    if (!doc.exists) {
       return NextResponse.json({ 
         error: 'Conversation not found',
         code: "CONVERSATION_NOT_FOUND" 
       }, { status: 404 });
     }
 
-    const deleted = await db.delete(conversations)
-      .where(eq(conversations.id, parseInt(id)))
-      .returning();
-
-    return NextResponse.json({ 
+    await collection.doc(id).delete();
+    return NextResponse.json({
       message: 'Conversation deleted successfully',
-      conversation: deleted[0]
+      conversation: mapDoc(doc)
     }, { status: 200 });
   } catch (error) {
     console.error('DELETE error:', error);

@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { credentials } from '@/db/schema';
-import { eq } from 'drizzle-orm';
+import { adminDb } from '@/lib/firebaseAdmin';
 import { verifyTransactionSuccess } from '@/lib/blockchain';
 
 export async function POST(request: NextRequest) {
@@ -30,26 +28,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate credentialId is a valid integer
-    const parsedCredentialId = parseInt(credentialId);
-    if (isNaN(parsedCredentialId)) {
-      return NextResponse.json(
-        {
-          error: 'credentialId must be a valid integer',
-          code: 'INVALID_CREDENTIAL_ID',
-        },
-        { status: 400 }
-      );
-    }
-
     // Find credential by ID
-    const existingCredential = await db
-      .select()
-      .from(credentials)
-      .where(eq(credentials.id, parsedCredentialId))
-      .limit(1);
-
-    if (existingCredential.length === 0) {
+    const doc = await adminDb.collection('credentials').doc(credentialId).get();
+    if (!doc.exists) {
       return NextResponse.json(
         {
           error: 'Credential not found',
@@ -58,6 +39,7 @@ export async function POST(request: NextRequest) {
         { status: 404 }
       );
     }
+
 
     // Verify on-chain transaction succeeded
     const result = await verifyTransactionSuccess(blockchainTxHash.trim() as `0x${string}`);
@@ -72,21 +54,20 @@ export async function POST(request: NextRequest) {
     }
 
     // Update credential with blockchain verification
-    const updatedCredential = await db
-      .update(credentials)
-      .set({
-        blockchainTxHash: blockchainTxHash.trim(),
-        isVerifiedOnChain: true,
-        updatedAt: new Date().toISOString(),
-      })
-      .where(eq(credentials.id, parsedCredentialId))
-      .returning();
+    await adminDb.collection('credentials').doc(credentialId).update({
+      blockchainTxHash: blockchainTxHash.trim(),
+      isVerifiedOnChain: true,
+      updatedAt: new Date().toISOString(),
+    });
+
+    const updatedDoc = await adminDb.collection('credentials').doc(credentialId).get();
+    const credentialData = updatedDoc.data();
 
     return NextResponse.json(
       {
         success: true,
         message: 'Credential verified on blockchain',
-        credential: updatedCredential[0],
+        credential: { id: updatedDoc.id, ...credentialData },
       },
       { status: 200 }
     );

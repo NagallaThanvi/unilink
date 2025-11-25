@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { examResults, universities } from '@/db/schema';
-import { eq, like, and, or, desc } from 'drizzle-orm';
+import { adminDb } from '@/lib/firebaseAdmin';
 import { getCurrentUser } from '@/lib/auth';
 
 function calculateGrade(score: number, maxScore: number): string {
@@ -23,6 +21,30 @@ function validateScore(score: number, maxScore: number): { valid: boolean; error
   return { valid: true };
 }
 
+const COLLECTION_NAME = 'examResults';
+
+function mapDoc(doc: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirestore.DocumentSnapshot) {
+  const data = doc.data();
+  if (!data) return null;
+  return {
+    id: doc.id,
+    userId: data.userId ?? null,
+    universityId: data.universityId ?? null,
+    examName: data.examName ?? null,
+    subject: data.subject ?? null,
+    score: data.score ?? 0,
+    maxScore: data.maxScore ?? 0,
+    grade: data.grade ?? null,
+    examDate: data.examDate ?? null,
+    verificationHash: data.verificationHash ?? null,
+    isVerified: data.isVerified ?? false,
+    blockchainTxHash: data.blockchainTxHash ?? null,
+    ipfsHash: data.ipfsHash ?? null,
+    createdAt: data.createdAt ?? null,
+    updatedAt: data.updatedAt ?? null,
+  };
+}
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
@@ -35,67 +57,46 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(parseInt(searchParams.get('limit') || '20'), 100);
     const offset = parseInt(searchParams.get('offset') || '0');
 
+    const collection = adminDb.collection(COLLECTION_NAME);
+
     if (id) {
-      const parsedId = parseInt(id);
-      if (isNaN(parsedId)) {
-        return NextResponse.json({ 
-          error: 'Valid ID is required',
-          code: 'INVALID_ID' 
-        }, { status: 400 });
-      }
-
-      const result = await db.select()
-        .from(examResults)
-        .where(eq(examResults.id, parsedId))
-        .limit(1);
-
-      if (result.length === 0) {
+      const doc = await collection.doc(id).get();
+      if (!doc.exists) {
         return NextResponse.json({ error: 'Exam result not found' }, { status: 404 });
       }
-
-      return NextResponse.json(result[0], { status: 200 });
+      return NextResponse.json(mapDoc(doc), { status: 200 });
     }
 
-    const conditions = [];
+    let query: FirebaseFirestore.Query = collection.orderBy('createdAt', 'desc');
 
     if (userId) {
-      conditions.push(eq(examResults.userId, userId));
+      query = query.where('userId', '==', userId);
     }
 
     if (universityId) {
-      const parsedUniversityId = parseInt(universityId);
-      if (!isNaN(parsedUniversityId)) {
-        conditions.push(eq(examResults.universityId, parsedUniversityId));
-      }
+      query = query.where('universityId', '==', universityId);
     }
 
     if (subject) {
-      conditions.push(eq(examResults.subject, subject));
+      query = query.where('subject', '==', subject);
     }
 
     if (isVerified !== null && isVerified !== undefined) {
       const verifiedValue = isVerified === 'true';
-      conditions.push(eq(examResults.isVerified, verifiedValue));
+      query = query.where('isVerified', '==', verifiedValue);
     }
 
+    const snapshot = await query.limit(limit).offset(offset).get();
+    let results = snapshot.docs.map(mapDoc).filter(Boolean);
+
+    // In-memory text search if needed
     if (search) {
-      const searchCondition = or(
-        like(examResults.examName, `%${search}%`),
-        like(examResults.subject, `%${search}%`)
+      const lower = search.toLowerCase();
+      results = results.filter(r => 
+        (r.examName && r.examName.toLowerCase().includes(lower)) ||
+        (r.subject && r.subject.toLowerCase().includes(lower))
       );
-      conditions.push(searchCondition);
     }
-
-    let query = db.select().from(examResults);
-    
-    if (conditions.length > 0) {
-      query = query.where(and(...conditions));
-    }
-
-    const results = await query
-      .orderBy(desc(examResults.examDate))
-      .limit(limit)
-      .offset(offset);
 
     return NextResponse.json(results, { status: 200 });
   } catch (error) {
@@ -141,12 +142,9 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    const university = await db.select()
-      .from(universities)
-      .where(eq(universities.id, universityId))
-      .limit(1);
-
-    if (university.length === 0) {
+    // Verify university exists
+    const uniDoc = await adminDb.collection('universities').doc(universityId).get();
+    if (!uniDoc.exists) {
       return NextResponse.json({ 
         error: 'University not found',
         code: 'UNIVERSITY_NOT_FOUND' 
@@ -157,24 +155,28 @@ export async function POST(request: NextRequest) {
 
     const now = new Date().toISOString();
 
-    const newExamResult = await db.insert(examResults)
-      .values({
-        userId: 'user_id',
-        universityId,
-        examName: examName.trim(),
-        subject: subject.trim(),
-        score,
-        maxScore,
-        grade: calculatedGrade,
-        examDate,
-        credentialId: credentialId || null,
-        isVerified: isVerified || false,
-        createdAt: now,
-        updatedAt: now
-      })
-      .returning();
+    const user = await getCurrentUser(request);
+    if (!user) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+    }
 
-    return NextResponse.json(newExamResult[0], { status: 201 });
+    const newExamResult = await adminDb.collection(COLLECTION_NAME).add({
+      userId: user.id,
+      universityId,
+      examName: examName.trim(),
+      subject: subject.trim(),
+      score,
+      maxScore,
+      grade: calculatedGrade,
+      examDate,
+      credentialId: credentialId || null,
+      isVerified: isVerified || false,
+      createdAt: now,
+      updatedAt: now
+    });
+
+    const created = await newExamResult.get();
+    return NextResponse.json(mapDoc(created), { status: 201 });
   } catch (error) {
     console.error('POST error:', error);
     return NextResponse.json({ 
@@ -185,17 +187,26 @@ export async function POST(request: NextRequest) {
 
 export async function PUT(request: NextRequest) {
   try {
+    const user = await getCurrentUser(request);
+    if (!user) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+    }
+
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
 
-    if (!id || isNaN(parseInt(id))) {
+    if (!id) {
       return NextResponse.json({ 
         error: 'Valid ID is required',
         code: 'INVALID_ID' 
       }, { status: 400 });
     }
 
-    const parsedId = parseInt(id);
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const doc = await collection.doc(id).get();
+    if (!doc.exists || doc.data()?.userId !== user.id) {
+      return NextResponse.json({ error: 'Exam result not found' }, { status: 404 });
+    }
 
     const body = await request.json();
 
@@ -206,20 +217,12 @@ export async function PUT(request: NextRequest) {
       }, { status: 400 });
     }
 
-    const existing = await db.select()
-      .from(examResults)
-      .where(eq(examResults.id, parsedId))
-      .limit(1);
-
-    if (existing.length === 0) {
-      return NextResponse.json({ error: 'Exam result not found' }, { status: 404 });
-    }
-
+    const existingData = doc.data();
     const { universityId, examName, subject, score, maxScore, grade, examDate, credentialId, isVerified } = body;
 
     if (score !== undefined || maxScore !== undefined) {
-      const finalScore = score !== undefined ? score : existing[0].score;
-      const finalMaxScore = maxScore !== undefined ? maxScore : existing[0].maxScore;
+      const finalScore = score !== undefined ? score : existingData.score;
+      const finalMaxScore = maxScore !== undefined ? maxScore : existingData.maxScore;
 
       if (typeof finalScore !== 'number' || typeof finalMaxScore !== 'number') {
         return NextResponse.json({ 
@@ -238,12 +241,8 @@ export async function PUT(request: NextRequest) {
     }
 
     if (universityId !== undefined) {
-      const university = await db.select()
-        .from(universities)
-        .where(eq(universities.id, universityId))
-        .limit(1);
-
-      if (university.length === 0) {
+      const uniDoc = await adminDb.collection('universities').doc(universityId).get();
+      if (!uniDoc.exists) {
         return NextResponse.json({ 
           error: 'University not found',
           code: 'UNIVERSITY_NOT_FOUND' 
@@ -265,23 +264,15 @@ export async function PUT(request: NextRequest) {
     if (isVerified !== undefined) updates.isVerified = isVerified;
 
     if (score !== undefined || maxScore !== undefined) {
-      const finalScore = score !== undefined ? score : existing[0].score;
-      const finalMaxScore = maxScore !== undefined ? maxScore : existing[0].maxScore;
+      const finalScore = score !== undefined ? score : existingData.score;
+      const finalMaxScore = maxScore !== undefined ? maxScore : existingData.maxScore;
       updates.grade = grade || calculateGrade(finalScore, finalMaxScore);
     } else if (grade !== undefined) {
       updates.grade = grade;
     }
-
-    const updated = await db.update(examResults)
-      .set(updates)
-      .where(eq(examResults.id, parsedId))
-      .returning();
-
-    if (updated.length === 0) {
-      return NextResponse.json({ error: 'Exam result not found' }, { status: 404 });
-    }
-
-    return NextResponse.json(updated[0], { status: 200 });
+    await collection.doc(id).update(updates);
+    const updated = await collection.doc(id).get();
+    return NextResponse.json(mapDoc(updated), { status: 200 });
   } catch (error) {
     console.error('PUT error:', error);
     return NextResponse.json({ 
@@ -292,38 +283,31 @@ export async function PUT(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
+    const user = await getCurrentUser(request);
+    if (!user) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+    }
+
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
 
-    if (!id || isNaN(parseInt(id))) {
+    if (!id) {
       return NextResponse.json({ 
         error: 'Valid ID is required',
         code: 'INVALID_ID' 
       }, { status: 400 });
     }
 
-    const parsedId = parseInt(id);
-
-    const existing = await db.select()
-      .from(examResults)
-      .where(eq(examResults.id, parsedId))
-      .limit(1);
-
-    if (existing.length === 0) {
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const doc = await collection.doc(id).get();
+    if (!doc.exists || doc.data()?.userId !== user.id) {
       return NextResponse.json({ error: 'Exam result not found' }, { status: 404 });
     }
 
-    const deleted = await db.delete(examResults)
-      .where(eq(examResults.id, parsedId))
-      .returning();
-
-    if (deleted.length === 0) {
-      return NextResponse.json({ error: 'Exam result not found' }, { status: 404 });
-    }
-
+    await collection.doc(id).delete();
     return NextResponse.json({ 
       message: 'Exam result deleted successfully',
-      deletedRecord: deleted[0]
+      deletedRecord: mapDoc(doc)
     }, { status: 200 });
   } catch (error) {
     console.error('DELETE error:', error);

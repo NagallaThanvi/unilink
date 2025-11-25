@@ -1,11 +1,27 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { newsletters } from '@/db/schema';
-import { eq, like, and, or, desc } from 'drizzle-orm';
+import { adminDb } from '@/lib/firebaseAdmin';
 import { getCurrentUser } from '@/lib/auth';
 
 const VALID_STATUSES = ['draft', 'published', 'scheduled'] as const;
 type NewsletterStatus = typeof VALID_STATUSES[number];
+const COLLECTION_NAME = 'newsletters';
+
+function mapDoc(doc: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirestore.DocumentSnapshot) {
+  const data = doc.data();
+  if (!data) return null;
+  return {
+    id: doc.id,
+    universityId: data.universityId ?? null,
+    title: data.title ?? null,
+    content: data.content ?? null,
+    status: data.status ?? 'draft',
+    scheduledFor: data.scheduledFor ?? null,
+    sentAt: data.sentAt ?? null,
+    createdBy: data.createdBy ?? null,
+    createdAt: data.createdAt ?? null,
+    updatedAt: data.updatedAt ?? null,
+  };
+}
 
 function isValidStatus(status: string): status is NewsletterStatus {
   return VALID_STATUSES.includes(status as NewsletterStatus);
@@ -22,63 +38,42 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(parseInt(searchParams.get('limit') || '20'), 100);
     const offset = parseInt(searchParams.get('offset') || '0');
 
+    const collection = adminDb.collection(COLLECTION_NAME);
+
     // Single record fetch
     if (id) {
-      if (isNaN(parseInt(id))) {
-        return NextResponse.json({ 
-          error: 'Valid ID is required',
-          code: 'INVALID_ID' 
-        }, { status: 400 });
-      }
-
-      const record = await db.select()
-        .from(newsletters)
-        .where(eq(newsletters.id, parseInt(id)))
-        .limit(1);
-
-      if (record.length === 0) {
+      const doc = await collection.doc(id).get();
+      if (!doc.exists) {
         return NextResponse.json({ error: 'Newsletter not found' }, { status: 404 });
       }
-
-      return NextResponse.json(record[0]);
+      return NextResponse.json(mapDoc(doc));
     }
 
-    // List with filters
-    let query = db.select().from(newsletters);
-    const conditions = [];
+    let query: FirebaseFirestore.Query = collection.orderBy('createdAt', 'desc');
 
     if (universityId) {
-      const univId = parseInt(universityId);
-      if (!isNaN(univId)) {
-        conditions.push(eq(newsletters.universityId, univId));
-      }
+      query = query.where('universityId', '==', universityId);
     }
 
     if (status && isValidStatus(status)) {
-      conditions.push(eq(newsletters.status, status));
+      query = query.where('status', '==', status);
     }
 
     if (createdBy) {
-      conditions.push(eq(newsletters.createdBy, createdBy));
+      query = query.where('createdBy', '==', createdBy);
     }
 
+    const snapshot = await query.limit(limit).offset(offset).get();
+    let results = snapshot.docs.map(mapDoc).filter(Boolean);
+
+    // In-memory text search if needed
     if (search) {
-      conditions.push(
-        or(
-          like(newsletters.title, `%${search}%`),
-          like(newsletters.content, `%${search}%`)
-        )
+      const lower = search.toLowerCase();
+      results = results.filter(n => 
+        (n.title && n.title.toLowerCase().includes(lower)) ||
+        (n.content && n.content.toLowerCase().includes(lower))
       );
     }
-
-    if (conditions.length > 0) {
-      query = query.where(and(...conditions));
-    }
-
-    const results = await query
-      .orderBy(desc(newsletters.createdAt))
-      .limit(limit)
-      .offset(offset);
 
     return NextResponse.json(results);
   } catch (error) {
@@ -143,12 +138,12 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    // Validate universityId is a valid integer
-    const univId = parseInt(universityId);
-    if (isNaN(univId)) {
+    // Verify university exists
+    const uniDoc = await adminDb.collection('universities').doc(universityId).get();
+    if (!uniDoc.exists) {
       return NextResponse.json({ 
-        error: "universityId must be a valid integer",
-        code: "INVALID_UNIVERSITY_ID" 
+        error: 'University not found',
+        code: 'UNIVERSITY_NOT_FOUND' 
       }, { status: 400 });
     }
 
@@ -193,7 +188,7 @@ export async function POST(request: NextRequest) {
     const now = new Date().toISOString();
 
     const insertData: any = {
-      universityId: univId,
+      universityId,
       title: title.trim(),
       content: content.trim(),
       createdBy: createdBy.trim(),
@@ -208,20 +203,20 @@ export async function POST(request: NextRequest) {
       insertData.htmlContent = htmlContent;
     }
 
-    if (publishDate) {
-      insertData.publishDate = publishDate;
+    if (newsletterStatus === 'scheduled' && publishDate) {
+      insertData.scheduledFor = publishDate;
     }
 
     if (aiPrompt) {
       insertData.aiPrompt = aiPrompt;
     }
 
-    const newNewsletter = await db.insert(newsletters)
-      .values(insertData)
-      .returning();
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const ref = await collection.add(insertData);
+    const created = await ref.get();
+    return NextResponse.json(mapDoc(created), { status: 201 });
 
-    return NextResponse.json(newNewsletter[0], { status: 201 });
-  } catch (error) {
+    } catch (error) {
     console.error('POST error:', error);
     return NextResponse.json({ 
       error: 'Internal server error: ' + error 
@@ -234,11 +229,17 @@ export async function PUT(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
 
-    if (!id || isNaN(parseInt(id))) {
+    if (!id) {
       return NextResponse.json({ 
         error: "Valid ID is required",
         code: "INVALID_ID" 
       }, { status: 400 });
+    }
+
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const doc = await collection.doc(id).get();
+    if (!doc.exists) {
+      return NextResponse.json({ error: 'Newsletter not found' }, { status: 404 });
     }
 
     const body = await request.json();
@@ -251,30 +252,20 @@ export async function PUT(request: NextRequest) {
       }, { status: 400 });
     }
 
-    // Check if record exists
-    const existing = await db.select()
-      .from(newsletters)
-      .where(eq(newsletters.id, parseInt(id)))
-      .limit(1);
-
-    if (existing.length === 0) {
-      return NextResponse.json({ error: 'Newsletter not found' }, { status: 404 });
-    }
-
     const updates: any = {
       updatedAt: new Date().toISOString()
     };
 
     // Validate and add optional fields
     if (body.universityId !== undefined) {
-      const univId = parseInt(body.universityId);
-      if (isNaN(univId)) {
+      const uniDoc = await adminDb.collection('universities').doc(body.universityId).get();
+      if (!uniDoc.exists) {
         return NextResponse.json({ 
-          error: "universityId must be a valid integer",
+          error: "University not found",
           code: "INVALID_UNIVERSITY_ID" 
         }, { status: 400 });
       }
-      updates.universityId = univId;
+      updates.universityId = body.universityId;
     }
 
     if (body.title !== undefined) {
@@ -311,7 +302,7 @@ export async function PUT(request: NextRequest) {
       updates.status = body.status;
 
       // Validate scheduled status requires publishDate
-      if (body.status === 'scheduled' && !body.publishDate && !existing[0].publishDate) {
+      if (body.status === 'scheduled' && !body.publishDate && !doc.data()?.scheduledFor) {
         return NextResponse.json({ 
           error: "publishDate is required when status is scheduled",
           code: "MISSING_PUBLISH_DATE" 
@@ -320,7 +311,7 @@ export async function PUT(request: NextRequest) {
     }
 
     if (body.publishDate !== undefined) {
-      updates.publishDate = body.publishDate;
+      updates.scheduledFor = body.publishDate;
     }
 
     if (body.recipientCount !== undefined) {
@@ -349,22 +340,9 @@ export async function PUT(request: NextRequest) {
       updates.aiPrompt = body.aiPrompt;
     }
 
-    if (body.createdBy !== undefined) {
-      if (typeof body.createdBy !== 'string' || body.createdBy.trim() === '') {
-        return NextResponse.json({ 
-          error: "createdBy must be a non-empty string",
-          code: "INVALID_CREATED_BY" 
-        }, { status: 400 });
-      }
-      updates.createdBy = body.createdBy.trim();
-    }
-
-    const updated = await db.update(newsletters)
-      .set(updates)
-      .where(eq(newsletters.id, parseInt(id)))
-      .returning();
-
-    return NextResponse.json(updated[0]);
+    await collection.doc(id).update(updates);
+    const updated = await collection.doc(id).get();
+    return NextResponse.json(mapDoc(updated));
   } catch (error) {
     console.error('PUT error:', error);
     return NextResponse.json({ 
@@ -378,30 +356,23 @@ export async function DELETE(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
 
-    if (!id || isNaN(parseInt(id))) {
+    if (!id) {
       return NextResponse.json({ 
         error: "Valid ID is required",
         code: "INVALID_ID" 
       }, { status: 400 });
     }
 
-    // Check if record exists
-    const existing = await db.select()
-      .from(newsletters)
-      .where(eq(newsletters.id, parseInt(id)))
-      .limit(1);
-
-    if (existing.length === 0) {
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const doc = await collection.doc(id).get();
+    if (!doc.exists) {
       return NextResponse.json({ error: 'Newsletter not found' }, { status: 404 });
     }
 
-    const deleted = await db.delete(newsletters)
-      .where(eq(newsletters.id, parseInt(id)))
-      .returning();
-
+    await collection.doc(id).delete();
     return NextResponse.json({
       message: 'Newsletter deleted successfully',
-      deleted: deleted[0]
+      deleted: mapDoc(doc)
     });
   } catch (error) {
     console.error('DELETE error:', error);

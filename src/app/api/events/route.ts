@@ -1,8 +1,47 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { events, eventRegistrations } from '@/db/schema';
-import { eq, like, and, or, desc, asc, gte, lt, sql } from 'drizzle-orm';
-import { auth } from '@/lib/auth';
+import { adminDb } from '@/lib/firebaseAdmin';
+import { getCurrentUser } from '@/lib/auth';
+
+const COLLECTION_NAME = 'events';
+const REGISTRATIONS_COLLECTION = 'eventRegistrations';
+
+function mapDoc(doc: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirestore.DocumentSnapshot) {
+  const data = doc.data();
+  if (!data) return null;
+  return {
+    id: doc.id,
+    title: data.title ?? null,
+    description: data.description ?? null,
+    eventDate: data.eventDate ?? null,
+    eventTime: data.eventTime ?? null,
+    location: data.location ?? null,
+    organizerId: data.organizerId ?? null,
+    universityId: data.universityId ?? null,
+    maxAttendees: data.maxAttendees ?? null,
+    currentAttendees: data.currentAttendees ?? 0,
+    imageUrl: data.imageUrl ?? null,
+    tags: data.tags ?? null,
+    registrationDeadline: data.registrationDeadline ?? null,
+    isPublic: data.isPublic ?? false,
+    status: data.status ?? null,
+    createdAt: data.createdAt ?? null,
+    updatedAt: data.updatedAt ?? null,
+  };
+}
+
+function mapRegistrationDoc(doc: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirestore.DocumentSnapshot) {
+  const data = doc.data();
+  if (!data) return null;
+  return {
+    id: doc.id,
+    eventId: data.eventId ?? null,
+    userId: data.userId ?? null,
+    registeredAt: data.registeredAt ?? null,
+    attendanceStatus: data.attendanceStatus ?? null,
+    createdAt: data.createdAt ?? null,
+    updatedAt: data.updatedAt ?? null,
+  };
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -18,21 +57,12 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(parseInt(searchParams.get('limit') || '20'), 100);
     const offset = parseInt(searchParams.get('offset') || '0');
 
+    const collection = adminDb.collection(COLLECTION_NAME);
+
     // Single event fetch with registration count
     if (id) {
-      if (!id || isNaN(parseInt(id))) {
-        return NextResponse.json({ 
-          error: "Valid ID is required",
-          code: "INVALID_ID" 
-        }, { status: 400 });
-      }
-
-      const eventResult = await db.select()
-        .from(events)
-        .where(eq(events.id, parseInt(id)))
-        .limit(1);
-
-      if (eventResult.length === 0) {
+      const doc = await collection.doc(id).get();
+      if (!doc.exists) {
         return NextResponse.json({ 
           error: 'Event not found',
           code: 'EVENT_NOT_FOUND' 
@@ -40,91 +70,81 @@ export async function GET(request: NextRequest) {
       }
 
       // Get registration count
-      const registrationCount = await db.select({ count: sql<number>`count(*)` })
-        .from(eventRegistrations)
-        .where(eq(eventRegistrations.eventId, parseInt(id)));
+      const regsSnapshot = await adminDb
+        .collection(REGISTRATIONS_COLLECTION)
+        .where('eventId', '==', id)
+        .get();
+      const registrationCount = regsSnapshot.size;
 
       return NextResponse.json({
-        ...eventResult[0],
-        registrationCount: registrationCount[0]?.count || 0
+        ...mapDoc(doc),
+        registrationCount
       }, { status: 200 });
     }
 
-    // List events with filters
-    let query = db.select().from(events);
-    const conditions = [];
+    let query: FirebaseFirestore.Query = collection.orderBy('createdAt', 'desc');
 
     // Filter by universityId
     if (universityId) {
-      conditions.push(eq(events.universityId, parseInt(universityId)));
+      const univId = parseInt(universityId);
+      if (!isNaN(univId)) {
+        query = query.where('universityId', '==', univId);
+      }
     }
 
     // Filter by status
     if (status) {
-      conditions.push(eq(events.status, status));
+      query = query.where('status', '==', status);
     }
 
     // Filter by organizerId
     if (organizerId) {
-      conditions.push(eq(events.organizerId, organizerId));
+      query = query.where('organizerId', '==', organizerId);
     }
 
     // Filter by isPublic
     if (isPublic !== null && isPublic !== undefined) {
       const isPublicBool = isPublic === 'true' || isPublic === '1';
-      conditions.push(eq(events.isPublic, isPublicBool ? 1 : 0));
+      query = query.where('isPublic', '==', isPublicBool);
     }
 
     // Filter upcoming events
     if (upcoming === 'true' || upcoming === '1') {
       const currentDate = new Date().toISOString().split('T')[0];
-      conditions.push(gte(events.eventDate, currentDate));
+      query = query.where('eventDate', '>=', currentDate);
     }
 
     // Filter past events
     if (past === 'true' || past === '1') {
       const currentDate = new Date().toISOString().split('T')[0];
-      conditions.push(lt(events.eventDate, currentDate));
+      query = query.where('eventDate', '<', currentDate);
     }
 
-    // Search in title and description
+    // Apply filters and pagination
+    const snapshot = await query.limit(limit).offset(offset).get();
+    let events = snapshot.docs.map(mapDoc).filter(Boolean);
+
+    // In-memory text search (basic)
     if (search) {
-      const searchCondition = or(
-        like(events.title, `%${search}%`),
-        like(events.description, `%${search}%`)
+      const lower = search.toLowerCase();
+      events = events.filter((e: any) =>
+        (e.title && e.title.toLowerCase().includes(lower)) ||
+        (e.description && e.description.toLowerCase().includes(lower))
       );
-      conditions.push(searchCondition);
     }
 
-    // Apply all conditions
-    if (conditions.length > 0) {
-      query = query.where(and(...conditions));
-    }
-
-    // Order by eventDate
-    if (past === 'true' || past === '1') {
-      query = query.orderBy(desc(events.eventDate));
-    } else {
-      query = query.orderBy(asc(events.eventDate));
-    }
-
-    // Apply pagination
-    const results = await query.limit(limit).offset(offset);
-
-    return NextResponse.json(results, { status: 200 });
+    return NextResponse.json(events, { status: 200 });
   } catch (error) {
     console.error('GET error:', error);
-    return NextResponse.json({ 
-      error: 'Internal server error: ' + error 
-    }, { status: 500 });
+    return NextResponse.json({ error: 'Internal server error: ' + error }, { status: 500 });
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
     // Authentication check
-    const session = await auth.api.getSession({ headers: request.headers });
-    if (!session?.user) {
+    const authUser = await getCurrentUser(request);
+    if (!authUser) {
       return NextResponse.json({ 
         error: 'Authentication required',
         code: 'AUTHENTICATION_REQUIRED' 
@@ -243,7 +263,7 @@ export async function POST(request: NextRequest) {
       eventDate,
       eventTime: eventTime.trim(),
       location: location.trim(),
-      organizerId: session.user.id,
+      organizerId: authUser.id,
       currentAttendees: 0,
       status: 'upcoming',
       createdAt: now,
@@ -270,12 +290,10 @@ export async function POST(request: NextRequest) {
       insertData.isPublic = isPublic ? 1 : 0;
     }
 
-    // Insert into database
-    const newEvent = await db.insert(events)
-      .values(insertData)
-      .returning();
-
-    return NextResponse.json(newEvent[0], { status: 201 });
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const ref = await collection.add(insertData);
+    const created = await ref.get();
+    return NextResponse.json(mapDoc(created), { status: 201 });
   } catch (error) {
     console.error('POST error:', error);
     return NextResponse.json({ 
@@ -287,8 +305,8 @@ export async function POST(request: NextRequest) {
 export async function PUT(request: NextRequest) {
   try {
     // Authentication check
-    const session = await auth.api.getSession({ headers: request.headers });
-    if (!session?.user) {
+    const authUser = await getCurrentUser(request);
+    if (!authUser) {
       return NextResponse.json({ 
         error: 'Authentication required',
         code: 'AUTHENTICATION_REQUIRED' 
@@ -298,29 +316,24 @@ export async function PUT(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const id = searchParams.get('id');
 
-    // Validate ID
-    if (!id || isNaN(parseInt(id))) {
+    if (!id) {
       return NextResponse.json({ 
         error: "Valid ID is required",
         code: "INVALID_ID" 
       }, { status: 400 });
     }
 
-    // Check event exists
-    const existingEvent = await db.select()
-      .from(events)
-      .where(eq(events.id, parseInt(id)))
-      .limit(1);
-
-    if (existingEvent.length === 0) {
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const doc = await collection.doc(id).get();
+    if (!doc.exists) {
       return NextResponse.json({ 
         error: 'Event not found',
         code: 'EVENT_NOT_FOUND' 
       }, { status: 404 });
     }
 
-    // Check if user is the organizer
-    if (existingEvent[0].organizerId !== session.user.id) {
+    const eventData = mapDoc(doc);
+    if (eventData?.organizerId !== authUser.id) {
       return NextResponse.json({ 
         error: 'Forbidden: You are not the organizer of this event',
         code: 'FORBIDDEN_NOT_ORGANIZER' 
@@ -411,7 +424,8 @@ export async function PUT(request: NextRequest) {
       }
       
       // Check if maxAttendees is less than currentAttendees
-      if (body.maxAttendees < existingEvent[0].currentAttendees) {
+      const current = eventData?.currentAttendees || 0;
+      if (body.maxAttendees < current) {
         return NextResponse.json({ 
           error: "Max attendees cannot be less than current attendees",
           code: "MAX_ATTENDEES_TOO_LOW" 
@@ -458,7 +472,7 @@ export async function PUT(request: NextRequest) {
           }, { status: 400 });
         }
 
-        const eventDate = new Date(updates.eventDate || existingEvent[0].eventDate);
+        const eventDate = new Date(updates.eventDate || eventData?.eventDate);
         if (deadlineDate >= eventDate) {
           return NextResponse.json({ 
             error: "Registration deadline must be before the event date",
@@ -477,13 +491,9 @@ export async function PUT(request: NextRequest) {
     // Always update updatedAt
     updates.updatedAt = new Date().toISOString();
 
-    // Perform update
-    const updatedEvent = await db.update(events)
-      .set(updates)
-      .where(eq(events.id, parseInt(id)))
-      .returning();
-
-    return NextResponse.json(updatedEvent[0], { status: 200 });
+    await collection.doc(id).update(updates);
+    const updated = await collection.doc(id).get();
+    return NextResponse.json(mapDoc(updated), { status: 200 });
   } catch (error) {
     console.error('PUT error:', error);
     return NextResponse.json({ 
@@ -495,8 +505,8 @@ export async function PUT(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     // Authentication check
-    const session = await auth.api.getSession({ headers: request.headers });
-    if (!session?.user) {
+    const authUser = await getCurrentUser(request);
+    if (!authUser) {
       return NextResponse.json({ 
         error: 'Authentication required',
         code: 'AUTHENTICATION_REQUIRED' 
@@ -506,43 +516,34 @@ export async function DELETE(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const id = searchParams.get('id');
 
-    // Validate ID
-    if (!id || isNaN(parseInt(id))) {
+    if (!id) {
       return NextResponse.json({ 
         error: "Valid ID is required",
         code: "INVALID_ID" 
       }, { status: 400 });
     }
 
-    // Check event exists
-    const existingEvent = await db.select()
-      .from(events)
-      .where(eq(events.id, parseInt(id)))
-      .limit(1);
-
-    if (existingEvent.length === 0) {
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const doc = await collection.doc(id).get();
+    if (!doc.exists) {
       return NextResponse.json({ 
         error: 'Event not found',
         code: 'EVENT_NOT_FOUND' 
       }, { status: 404 });
     }
 
-    // Check if user is the organizer
-    if (existingEvent[0].organizerId !== session.user.id) {
+    const eventData = mapDoc(doc);
+    if (eventData?.organizerId !== authUser.id) {
       return NextResponse.json({ 
         error: 'Forbidden: You are not the organizer of this event',
         code: 'FORBIDDEN_NOT_ORGANIZER' 
       }, { status: 403 });
     }
 
-    // Delete event (cascade will delete registrations)
-    const deletedEvent = await db.delete(events)
-      .where(eq(events.id, parseInt(id)))
-      .returning();
-
-    return NextResponse.json({ 
+    await collection.doc(id).delete();
+    return NextResponse.json({
       message: 'Event deleted successfully',
-      event: deletedEvent[0]
+      event: mapDoc(doc)
     }, { status: 200 });
   } catch (error) {
     console.error('DELETE error:', error);

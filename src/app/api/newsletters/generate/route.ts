@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { newsletters } from '@/db/schema';
+import { adminDb } from '@/lib/firebaseAdmin';
 
 function generateTitle(): string {
   const now = new Date();
@@ -76,13 +75,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate universityId is a valid integer
-    const parsedUniversityId = parseInt(universityId);
-    if (isNaN(parsedUniversityId)) {
+    // Verify university exists
+    const uniDoc = await adminDb.collection('universities').doc(universityId).get();
+    if (!uniDoc.exists) {
       return NextResponse.json(
         {
-          error: 'universityId must be a valid integer',
-          code: 'INVALID_UNIVERSITY_ID'
+          error: 'University not found',
+          code: 'UNIVERSITY_NOT_FOUND'
         },
         { status: 400 }
       );
@@ -95,37 +94,27 @@ export async function POST(request: NextRequest) {
 
     // Create newsletter with all required fields
     const now = new Date().toISOString();
-    const newNewsletter = await db.insert(newsletters)
-      .values({
-        universityId: parsedUniversityId,
-        createdBy: createdBy.trim(),
-        title: newsletterTitle.trim(),
-        content: content,
-        htmlContent: htmlContent,
-        aiPrompt: aiPrompt.trim(),
-        status: 'draft',
-        recipientCount: 0,
-        openRate: 0,
-        createdAt: now,
-        updatedAt: now
-      })
-      .returning();
+    const collection = adminDb.collection('newsletters');
+    const ref = await collection.add({
+      universityId,
+      createdBy: createdBy.trim(),
+      title: newsletterTitle.trim(),
+      content: content,
+      htmlContent: htmlContent,
+      aiPrompt: aiPrompt.trim(),
+      status: 'draft',
+      recipientCount: 0,
+      openRate: 0,
+      createdAt: now,
+      updatedAt: now
+    });
 
-    if (newNewsletter.length === 0) {
-      return NextResponse.json(
-        {
-          error: 'Failed to create newsletter',
-          code: 'CREATION_FAILED'
-        },
-        { status: 500 }
-      );
-    }
-
+    const created = await ref.get();
     return NextResponse.json(
       {
         success: true,
         message: 'Newsletter generated successfully',
-        newsletter: newNewsletter[0]
+        newsletter: { id: created.id, ...created.data() }
       },
       { status: 201 }
     );

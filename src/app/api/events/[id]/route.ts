@@ -1,7 +1,32 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { events, eventRegistrations } from '@/db/schema';
-import { eq, sql } from 'drizzle-orm';
+import { adminDb } from '@/lib/firebaseAdmin';
+
+const EVENTS_COLLECTION = 'events';
+const REGISTRATIONS_COLLECTION = 'eventRegistrations';
+
+function mapEventDoc(doc: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirestore.DocumentSnapshot) {
+  const data = doc.data();
+  if (!data) return null;
+  return {
+    id: doc.id,
+    title: data.title ?? null,
+    description: data.description ?? null,
+    eventDate: data.eventDate ?? null,
+    eventTime: data.eventTime ?? null,
+    location: data.location ?? null,
+    universityId: data.universityId ?? null,
+    organizerId: data.organizerId ?? null,
+    maxAttendees: data.maxAttendees ?? 0,
+    currentAttendees: data.currentAttendees ?? 0,
+    imageUrl: data.imageUrl ?? null,
+    status: data.status ?? null,
+    tags: data.tags ?? [],
+    registrationDeadline: data.registrationDeadline ?? null,
+    isPublic: data.isPublic ?? false,
+    createdAt: data.createdAt ?? null,
+    updatedAt: data.updatedAt ?? null,
+  };
+}
 
 export async function GET(
   request: NextRequest,
@@ -10,24 +35,17 @@ export async function GET(
   try {
     const { id } = params;
 
-    // Validate ID is valid integer
-    if (!id || isNaN(parseInt(id))) {
+    if (!id) {
       return NextResponse.json(
         { error: 'Valid ID is required', code: 'INVALID_ID' },
         { status: 400 }
       );
     }
 
-    const eventId = parseInt(id);
-
     // Query event by ID
-    const event = await db
-      .select()
-      .from(events)
-      .where(eq(events.id, eventId))
-      .limit(1);
+    const doc = await adminDb.collection(EVENTS_COLLECTION).doc(id).get();
 
-    if (event.length === 0) {
+    if (!doc.exists) {
       return NextResponse.json(
         { error: 'Event not found', code: 'EVENT_NOT_FOUND' },
         { status: 404 }
@@ -35,17 +53,15 @@ export async function GET(
     }
 
     // Get registration count for this event
-    const registrationCountResult = await db
-      .select({ count: sql<number>`count(*)` })
-      .from(eventRegistrations)
-      .where(eq(eventRegistrations.eventId, eventId));
-
-    const registrationCount = registrationCountResult[0]?.count || 0;
+    const registrationSnapshot = await adminDb.collection(REGISTRATIONS_COLLECTION)
+      .where('eventId', '==', id)
+      .get();
+    const registrationCount = registrationSnapshot.size;
 
     // Return event with registration count
     return NextResponse.json(
       {
-        ...event[0],
+        ...mapEventDoc(doc),
         registrationCount,
       },
       { status: 200 }

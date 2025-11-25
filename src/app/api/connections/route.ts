@@ -1,10 +1,27 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { alumniConnections } from '@/db/schema';
-import { eq, like, and, or, desc, asc } from 'drizzle-orm';
+import { adminDb } from '@/lib/firebaseAdmin';
+import { getCurrentUser } from '@/lib/auth';
 
 const VALID_CONNECTION_TYPES = ['mentorship', 'networking', 'collaboration'];
 const VALID_STATUSES = ['pending', 'accepted', 'rejected'];
+const COLLECTION_NAME = 'connections';
+
+function mapDoc(doc: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirestore.DocumentSnapshot) {
+  const data = doc.data();
+  if (!data) return null;
+  return {
+    id: doc.id,
+    requesterId: data.requesterId ?? null,
+    recipientId: data.recipientId ?? null,
+    connectionType: data.connectionType ?? null,
+    status: data.status ?? 'pending',
+    message: data.message ?? null,
+    requestedAt: data.requestedAt ?? null,
+    respondedAt: data.respondedAt ?? null,
+    createdAt: data.createdAt ?? null,
+    updatedAt: data.updatedAt ?? null,
+  };
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -18,82 +35,70 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(parseInt(searchParams.get('limit') || '20'), 100);
     const offset = parseInt(searchParams.get('offset') || '0');
 
+    const collection = adminDb.collection(COLLECTION_NAME);
+
     // Single connection by ID
     if (id) {
-      if (isNaN(parseInt(id))) {
-        return NextResponse.json(
-          { error: 'Valid ID is required', code: 'INVALID_ID' },
-          { status: 400 }
-        );
-      }
-
-      const connection = await db
-        .select()
-        .from(alumniConnections)
-        .where(eq(alumniConnections.id, parseInt(id)))
-        .limit(1);
-
-      if (connection.length === 0) {
+      const doc = await collection.doc(id).get();
+      if (!doc.exists) {
         return NextResponse.json(
           { error: 'Connection not found' },
           { status: 404 }
         );
       }
-
-      return NextResponse.json(connection[0]);
+      return NextResponse.json(mapDoc(doc));
     }
 
     // List connections with filters
-    let query = db.select().from(alumniConnections);
-    const conditions = [];
+    let query: FirebaseFirestore.Query = collection.orderBy('createdAt', 'desc');
 
     // Filter by userId (connections where user is either requester or recipient)
     if (userId) {
-      conditions.push(
-        or(
-          eq(alumniConnections.requesterId, userId),
-          eq(alumniConnections.recipientId, userId)
-        )
-      );
+      // Firestore doesn't support OR directly; we'll fetch both and merge in memory
+      const [asReq, asRec] = await Promise.all([
+        collection.where('requesterId', '==', userId).get(),
+        collection.where('recipientId', '==', userId).get(),
+      ]);
+      const merged = [...asReq.docs, ...asRec.docs];
+      // Remove duplicates (if any) and apply other filters in memory
+      const unique = Array.from(new Map(merged.map(doc => [doc.id, doc])).values());
+      let results = unique.map(mapDoc).filter(Boolean);
+      if (status) results = results.filter(c => c.status === status);
+      if (connectionType) results = results.filter(c => c.connectionType === connectionType);
+      if (requesterId) results = results.filter(c => c.requesterId === requesterId);
+      if (recipientId) results = results.filter(c => c.recipientId === recipientId);
+      return NextResponse.json(results.slice(offset, offset + limit));
     }
 
     // Filter by requesterId
     if (requesterId) {
-      conditions.push(eq(alumniConnections.requesterId, requesterId));
+      query = query.where('requesterId', '==', requesterId);
     }
 
     // Filter by recipientId
     if (recipientId) {
-      conditions.push(eq(alumniConnections.recipientId, recipientId));
+      query = query.where('recipientId', '==', recipientId);
     }
 
     // Filter by status
     if (status) {
-      conditions.push(eq(alumniConnections.status, status));
+      query = query.where('status', '==', status);
     }
 
     // Filter by connectionType
     if (connectionType) {
-      conditions.push(eq(alumniConnections.connectionType, connectionType));
+      query = query.where('connectionType', '==', connectionType);
     }
 
-    if (conditions.length > 0) {
-      query = query.where(and(...conditions));
-    }
-
-    // Apply pagination and sorting
-    const results = await query
-      .orderBy(desc(alumniConnections.createdAt))
-      .limit(limit)
-      .offset(offset);
+    const snapshot = await query.limit(limit).offset(offset).get();
+    const results = snapshot.docs.map(mapDoc).filter(Boolean);
 
     return NextResponse.json(results);
   } catch (error) {
     console.error('GET error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error: ' + error },
-      { status: 500 }
-    );
+    return NextResponse.json({ 
+      error: 'Internal server error: ' + error 
+    }, { status: 500 });
   }
 }
 
@@ -148,20 +153,20 @@ export async function POST(request: NextRequest) {
 
     // Create connection request
     const now = new Date().toISOString();
-    const newConnection = await db
-      .insert(alumniConnections)
-      .values({
-        requesterId: requesterId.trim(),
-        recipientId: recipientId.trim(),
-        connectionType,
-        message: message ? message.trim() : null,
-        status: 'pending',
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning();
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const ref = await collection.add({
+      requesterId: requesterId.trim(),
+      recipientId: recipientId.trim(),
+      connectionType,
+      message: message ? message.trim() : null,
+      status: 'pending',
+      requestedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    });
 
-    return NextResponse.json(newConnection[0], { status: 201 });
+    const created = await ref.get();
+    return NextResponse.json(mapDoc(created), { status: 201 });
   } catch (error) {
     console.error('POST error:', error);
     return NextResponse.json(
@@ -177,10 +182,19 @@ export async function PUT(request: NextRequest) {
     const id = searchParams.get('id');
 
     // Validate ID parameter
-    if (!id || isNaN(parseInt(id))) {
+    if (!id) {
       return NextResponse.json(
         { error: 'Valid ID is required', code: 'INVALID_ID' },
         { status: 400 }
+      );
+    }
+
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const doc = await collection.doc(id).get();
+    if (!doc.exists) {
+      return NextResponse.json(
+        { error: 'Connection not found', code: 'CONNECTION_NOT_FOUND' },
+        { status: 404 }
       );
     }
 
@@ -198,20 +212,6 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    // Check if connection exists
-    const existing = await db
-      .select()
-      .from(alumniConnections)
-      .where(eq(alumniConnections.id, parseInt(id)))
-      .limit(1);
-
-    if (existing.length === 0) {
-      return NextResponse.json(
-        { error: 'Connection not found' },
-        { status: 404 }
-      );
-    }
-
     // Build update object
     const updates: any = {
       updatedAt: new Date().toISOString(),
@@ -219,6 +219,9 @@ export async function PUT(request: NextRequest) {
 
     if (status !== undefined) {
       updates.status = status;
+      if (status === 'accepted' || status === 'rejected') {
+        updates.respondedAt = new Date().toISOString();
+      }
     }
 
     if (message !== undefined) {
@@ -226,13 +229,9 @@ export async function PUT(request: NextRequest) {
     }
 
     // Update connection
-    const updated = await db
-      .update(alumniConnections)
-      .set(updates)
-      .where(eq(alumniConnections.id, parseInt(id)))
-      .returning();
-
-    return NextResponse.json(updated[0]);
+    await collection.doc(id).update(updates);
+    const updated = await collection.doc(id).get();
+    return NextResponse.json(mapDoc(updated));
   } catch (error) {
     console.error('PUT error:', error);
     return NextResponse.json(
@@ -248,36 +247,26 @@ export async function DELETE(request: NextRequest) {
     const id = searchParams.get('id');
 
     // Validate ID parameter
-    if (!id || isNaN(parseInt(id))) {
+    if (!id) {
       return NextResponse.json(
         { error: 'Valid ID is required', code: 'INVALID_ID' },
         { status: 400 }
       );
     }
 
-    // Check if connection exists
-    const existing = await db
-      .select()
-      .from(alumniConnections)
-      .where(eq(alumniConnections.id, parseInt(id)))
-      .limit(1);
-
-    if (existing.length === 0) {
+    const collection = adminDb.collection(COLLECTION_NAME);
+    const doc = await collection.doc(id).get();
+    if (!doc.exists) {
       return NextResponse.json(
         { error: 'Connection not found' },
         { status: 404 }
       );
     }
 
-    // Delete connection
-    const deleted = await db
-      .delete(alumniConnections)
-      .where(eq(alumniConnections.id, parseInt(id)))
-      .returning();
-
+    await collection.doc(id).delete();
     return NextResponse.json({
       message: 'Connection deleted successfully',
-      deleted: deleted[0],
+      deleted: mapDoc(doc),
     });
   } catch (error) {
     console.error('DELETE error:', error);
